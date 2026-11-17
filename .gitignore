@@ -6,3 +6,4 @@ dynamic/webhooks/*.json
 # Build output
 /fluid-agent
 *.exe
+samples/
