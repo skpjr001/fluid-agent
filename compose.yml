@@ -1,0 +1,24 @@
+# Webhook ingress goes through Traefik (TLS); forward proxy + admin stay off Traefik.
+services:
+  proxy-agent:
+    build: .
+    restart: unless-stopped
+    environment:
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set in .env}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./dynamic:/app/dynamic          # webhooks/*.json + proxy.json live here
+    ports:
+      - "8080:8080"                     # forward proxy - firewall to your IPs only!
+      - "127.0.0.1:9000:9000"           # admin API - localhost only (use SSH tunnel)
+    networks: [traefik]
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.hooks.rule=Host(`hooks.example.com`) && PathPrefix(`/hooks/`)
+      - traefik.http.routers.hooks.entrypoints=websecure
+      - traefik.http.routers.hooks.tls.certresolver=le
+      - traefik.http.services.hooks.loadbalancer.server.port=8081
+
+networks:
+  traefik:
+    external: true

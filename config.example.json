@@ -1,0 +1,11 @@
+{
+  "proxy_addr": ":8080",
+  "webhook_addr": ":8081",
+  "admin_addr": "127.0.0.1:9000",
+  "admin_token": "CHANGE-ME-use-PROXY_ADMIN_TOKEN-env",
+  "dynamic_dir": "./dynamic",
+  "reload_interval": "2s",
+  "trust_forwarded_for": false,
+  "max_conns": 2000,
+  "max_body_bytes": 10485760
+}

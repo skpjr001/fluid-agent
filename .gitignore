@@ -1,0 +1,9 @@
+# Local config / secrets
+config.json
+.env
+dynamic/webhooks/*.json
+
+# Build output
+/proxy-agent
+/fluid-agent
+*.exe
