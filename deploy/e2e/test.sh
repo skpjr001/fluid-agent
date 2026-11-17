@@ -88,9 +88,13 @@ check "fresh: sub-directories created" 'created dynamic config directory /app/dy
 check "fresh: token value never logged" 'not-logged' "$($COMPOSE logs agent-fresh 2>/dev/null | grep -qE '[0-9a-f]{64}' && echo leaked || echo not-logged)"
 check "fresh: created files are valid" 'OK: all config files are valid' "$($F check -config /app/config.json 2>&1)"
 check "fresh: init on a second run creates nothing" 'nothing to create' "$($F init -config /app/config.json 2>&1)"
+nboot() { $COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep -c '"topic":"bootstrap"'; }
+nstart() { $COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep -c 'fluid-agent started'; }
+before=$(nboot)
 $COMPOSE restart agent-fresh >/dev/null 2>&1
-for i in $(seq 1 15); do $F healthcheck -config /app/config.json >/dev/null 2>&1 && break; sleep 1; done
-check "fresh: restart keeps files (no bootstrap again)" 'none' "$($COMPOSE logs --no-log-prefix --since 20s agent-fresh 2>/dev/null | grep -q '"topic":"bootstrap"' && echo created-again || echo none)"
+for i in $(seq 1 20); do [[ $(nstart) -ge 2 ]] && break; sleep 1; done
+check "fresh: restarted" '2' "$(nstart)"
+check "fresh: restart keeps files (no bootstrap again)" "same $before" "same $(nboot)"
 
 echo "== deployment notes logged for each setup"
 logs() { $COMPOSE logs --no-log-prefix "$1" 2>/dev/null | grep '"kind":"deploy"'; }

@@ -12,18 +12,59 @@ Everything is stored in one SQLite file (logs, events, deliveries) and all confi
 
 ## Quick start
 
+No setup is needed: on first start the agent creates every directory and config file it is missing (see [First start](#first-start-what-is-created)).
+
+**On a host**
+
 ```bash
-fluid-agent                              # first run creates config.json, dynamic/ and data/
-cat dynamic/admin.json                   # generated editor token for the console
+fluid-agent                              # creates ./config.json, ./dynamic/ and ./data/, then serves
+cat dynamic/admin.json                   # the generated editor token for the console
 ```
 
-On first start the agent creates every directory and config file it needs, never overwriting an existing one: `config.json` with every default spelled out, `dynamic/` with `webhooks/`, `ingest/`, `profiles/`, a deny-by-default `proxy.json` and an `admin.json` holding a generated editor token (or no token when `PROXY_ADMIN_TOKEN` is set), the database directory and ACME caches. Each is logged with `kind: "deploy"` and `topic: "bootstrap"`; the token itself is never logged. `fluid-agent init` does the same without serving and then validates, and anything it cannot create (read-only mount) is a warning while the agent runs on built-in defaults.
+**With systemd** (unit in [`deploy/systemd`](deploy/systemd/fluid-agent.service))
 
-To start from examples instead: `cp config.example.json config.json`, `cp -r examples/dynamic dynamic`, replace every CHANGE-ME value, then `fluid-agent check`.
+```bash
+sudo useradd -r -s /usr/sbin/nologin -d /var/lib/fluid-agent fluid
+sudo install -m 755 fluid-agent /usr/local/bin/
+sudo cp deploy/systemd/fluid-agent.service /etc/systemd/system/
+sudo systemctl enable --now fluid-agent  # everything is created under /var/lib/fluid-agent
+sudo cat /var/lib/fluid-agent/dynamic/admin.json
+```
 
-Open the console with an SSH tunnel: `ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>, and sign in with a token from `dynamic/admin.json`.
+**In a container**
 
-Docker: `docker run` with no mounts works (the agent creates `/app/config.json` and `/app/dynamic`). With Traefik: `cp config.docker.json config.json`, optionally copy `examples/dynamic` to `./dynamic`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`.
+```bash
+docker build -t fluid-agent .
+docker run -d --name fluid-agent -p 8080:8080 -p 8081:8081 -v fluid-data:/app/data fluid-agent
+```
+
+With no mounts the agent creates `/app/config.json` and `/app/dynamic/`. For the Traefik setup in [`compose.yml`](compose.yml): `cp config.docker.json config.json`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`. A bind-mounted file must exist on the host first (Docker would otherwise create a directory in its place, and the agent says so); a bind-mounted directory must be writable by uid 65532 for console edits.
+
+**Then:** open the console through an SSH tunnel (`ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>) and sign in with the token from `admin.json`. Add proxy clients, allowed hosts, webhooks and ingest rules there, or copy the samples from [`examples/dynamic`](examples/dynamic) (replace every CHANGE-ME value) and run `fluid-agent check`.
+
+### First start: what is created
+
+Existing files are never overwritten. Each item is logged as `info` with `kind: "deploy"`, `topic: "bootstrap"` and its absolute path; anything that cannot be created (read-only mount, wrong owner) is logged as `warn` and the agent runs on built-in defaults.
+
+| Path (defaults) | Contents |
+|---|---|
+| `config.json` (`-config`) | every static setting with its default value and `$schema` |
+| `dynamic/` + `webhooks/`, `ingest/`, `profiles/` | empty collections |
+| `dynamic/proxy.json` | no clients, no allowed hosts, port 443: every proxy request is refused until you add some |
+| `dynamic/admin.json` (mode 0600) | one editor token named `admin`, random 64 hex chars; the value is never logged. With `PROXY_ADMIN_TOKEN` set it is created with no tokens |
+| `data/` (`database.path`) | the SQLite database |
+| `data/acme/` or `acme.cache_dir` (mode 0700) | certificate cache, only when ACME is configured |
+
+### Commands
+
+| Command | What it does |
+|---|---|
+| `fluid-agent [serve] [-config config.json]` | create anything missing, then run the agent |
+| `fluid-agent init [-config …]` | create anything missing and validate, without serving (exit 1 on invalid files or items it could not create) |
+| `fluid-agent check [-config …]` | validate config.json and every dynamic file, print deployment notes; writes nothing |
+| `fluid-agent logs [flags]` | query the SQLite log store ([below](#logs-sqlite-and-querying)) |
+| `fluid-agent healthcheck [-config …]` | exit 0 if the local agent is live (container health checks) |
+| `fluid-agent version` | print the version |
 
 ## Where it can run
 
@@ -35,7 +76,7 @@ On a host (systemd) or in a container; directly with built-in HTTPS or behind ng
 
 ## Configuration: the file provider
 
-`config.json` is read once at startup. Everything else lives in `dynamic_dir`, is checked every `reload_interval`, and is written back by the console/API (atomic temp-file + rename). Every file is decoded strictly (unknown keys are errors) and carries a `$schema` for editor validation.
+`config.json` is read once at startup (created with defaults if missing). Everything else lives in `dynamic_dir`, is checked every `reload_interval`, and is written back by the console/API (atomic temp-file + rename). Every file is decoded strictly (unknown keys are errors) and carries a `$schema` for editor validation.
 
 ```
 config.json                     static: listeners, database, outbox, telemetry   (schema/config.schema.json)
@@ -147,7 +188,7 @@ Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenT
 
 * Firewall `:8080` to your office/VPN IPs; keep the admin listener on localhost.
 * Keep `allowed_hosts` to the providers you need; never enable `allow_private` unless required.
-* Use long random tokens (`openssl rand -hex 32`); give most people **viewer** tokens.
+* Use long random tokens (`openssl rand -hex 32`); give most people **viewer** tokens. Keep the generated `admin` editor token secret (`admin.json` is created 0600), or replace it.
 * Turn on `auth` for every webhook/ingest rule whose sender supports it (HMAC where offered).
 * Set `trusted_proxies` to exactly your reverse proxy.
 * Set `database.store_event_bodies: false` if payloads must not be kept after delivery.
@@ -168,7 +209,7 @@ go run . init -config /tmp/fa/config.json   # what a first start creates
 Prebuilt binaries for Linux, macOS and Windows (amd64/arm64) are on the [Releases](https://github.com/skpjr001/fluid-agent/releases) page, with `checksums.txt`. To cut a release, push a tag:
 
 ```sh
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.3.0 && git push origin v0.3.0
 ```
 
 `fluid-agent version` prints the version a binary was built from.
