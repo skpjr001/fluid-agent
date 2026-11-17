@@ -56,6 +56,10 @@ type DatabaseConfig struct {
 	RetentionDays    int    `json:"retention_days"`     // logs, events and finished deliveries older than this are pruned
 	LogLevel         string `json:"log_level"`          // minimum level stored in the log table
 	StoreEventBodies bool   `json:"store_event_bodies"` // keep bodies after all deliveries finish (for the UI)
+
+	// Every logged API call stores its request/response headers and bodies.
+	CapturePayloads     bool  `json:"capture_payloads"`
+	CaptureMaxBodyBytes int64 `json:"capture_max_body_bytes"` // per body; longer bodies are cut (the full size is recorded)
 }
 
 type OutboxConfig struct {
@@ -114,8 +118,9 @@ func defaultStatic() *StaticConfig {
 			DefaultTimeout:   Duration(20 * time.Second),
 			MaxTimeout:       Duration(120 * time.Second),
 		},
-		Database: DatabaseConfig{Path: "./data/fluid-agent.db", RetentionDays: 14, LogLevel: "info", StoreEventBodies: true},
-		Outbox:   OutboxConfig{Workers: 4, PollInterval: Duration(time.Second), MaxBackoff: Duration(10 * time.Minute)},
+		Database: DatabaseConfig{Path: "./data/fluid-agent.db", RetentionDays: 14, LogLevel: "info", StoreEventBodies: true,
+			CapturePayloads: true, CaptureMaxBodyBytes: 10 << 20},
+		Outbox: OutboxConfig{Workers: 4, PollInterval: Duration(time.Second), MaxBackoff: Duration(10 * time.Minute)},
 		Telemetry: TelemetryConfig{
 			ServiceName: "fluid-agent",
 			SampleRatio: 1,
@@ -228,6 +233,9 @@ func (c *StaticConfig) validate() error {
 	}
 	if c.Database.Path == "" {
 		errs = append(errs, errors.New("database.path is required"))
+	}
+	if c.Database.CaptureMaxBodyBytes < 0 {
+		errs = append(errs, errors.New("database.capture_max_body_bytes must be >= 0 (0 stores headers only)"))
 	}
 	if c.Database.RetentionDays < 1 {
 		errs = append(errs, errors.New("database.retention_days must be >= 1"))

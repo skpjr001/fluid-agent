@@ -81,6 +81,26 @@ func writeFwdError(w http.ResponseWriter, e *fwdError) {
 func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	src := ClientIP(r, f.app.cfg.trusted).String()
+	// The log row gets the call made upstream (RQH/RQB/RSH/RSB as sent to and
+	// received from the target); when the upstream is never reached, it gets
+	// the client's /forward request and the agent's answer instead.
+	own := f.app.newCapture()
+	defer own.Finish()
+	if own != nil {
+		own.SetRequest(requestHeaders(r.Method, r.URL.RequestURI(), r.Host, r.Header), nil)
+		body := own.TeeRequestBody(r.Body)
+		r.Body = body
+		defer f.app.drainInto(body) // runs before own.Finish: a refused call keeps its body
+		w = &captureWriter{ResponseWriter: w, c: own}
+	}
+	up := f.app.newCapture()
+	defer up.Finish()
+	logCap := func() *Capture {
+		if up.hasRequest() {
+			return up
+		}
+		return own
+	}
 	if r.Method != http.MethodPost {
 		writeFwdError(w, ferr(http.StatusMethodNotAllowed, "VALIDATION", "use POST"))
 		return
@@ -95,8 +115,8 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	client, ok := authenticateClient(f.app.store.Proxy(), token)
 	if !ok {
 		f.app.metrics.Inc("fluid_forward_requests_total", "result", "unauthorized")
-		slog.Warn("forward auth failed", "kind", "auth", "direction", "outbound", "source_ip", src, "status", 401)
 		writeFwdError(w, ferr(http.StatusUnauthorized, "UNAUTHORIZED", "invalid client token"))
+		slog.Warn("forward auth failed", "kind", "auth", "direction", "outbound", "source_ip", src, "status", 401, "capture", own)
 		return
 	}
 	var req ForwardRequest
@@ -106,7 +126,7 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, span := tracer.Start(extractTrace(r.Context(), r.Header), "forward", trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(attribute.String("fluid.client", client), attribute.String("fluid.profile", req.Profile)))
-	resp, target, err := f.do(ctx, client, &req)
+	resp, target, err := f.do(withCapture(ctx, up), client, &req)
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		var fe *fwdError
@@ -114,18 +134,19 @@ func (f *Forwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			fe = ferr(http.StatusBadGateway, "UPSTREAM_FAILURE", "%v", err)
 		}
 		f.app.metrics.Inc("fluid_forward_requests_total", "result", strings.ToLower(fe.code))
-		slog.Warn("forward failed", "kind", "forward", "direction", "outbound", "client", client, "source_ip", src,
-			"profile", req.Profile, "method", req.Method, "host", hostOf(target), "url", target, "status", fe.status,
-			"ms", ms, "code", fe.code, "err", fe.msg)
 		endSpan(span, fe.status, fe)
 		writeFwdError(w, fe)
+		slog.Warn("forward failed", "kind", "forward", "direction", "outbound", "client", client, "source_ip", src,
+			"profile", req.Profile, "method", req.Method, "host", hostOf(target), "url", target, "status", fe.status,
+			"ms", ms, "code", fe.code, "err", fe.msg, "capture", logCap())
 		return
 	}
 	resp.DurationMs = ms
 	f.app.metrics.Inc("fluid_forward_requests_total", "result", "ok")
 	slog.Info("forward", "kind", "forward", "direction", "outbound", "client", client, "source_ip", src,
 		"profile", req.Profile, "method", req.Method, "host", hostOf(resp.FinalURL), "url", resp.FinalURL,
-		"status", resp.Status, "bytes_out", len(resp.Body)+len(resp.BodyBase64), "ms", ms, "redirects", resp.Redirects)
+		"status", resp.Status, "bytes_out", len(resp.Body)+len(resp.BodyBase64), "ms", ms, "redirects", resp.Redirects,
+		"capture", logCap())
 	endSpan(span, resp.Status, nil)
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -243,6 +264,9 @@ func (f *Forwarder) do(ctx context.Context, client string, req *ForwardRequest) 
 		if !pc.hostAllowed(cur.Hostname(), defaultPort(cur)) {
 			return nil, cur.String(), ferr(403, "HOST_NOT_ALLOWED", "%q is not in allowed_hosts/allowed_ports", cur.Host)
 		}
+		up := captureFrom(ctx)
+		up.SetRequest(requestHeaders(method, cur.String(), cur.Host, headers), body)
+		up.SetResponse(nil, nil)
 		resp, err := f.send(ctx, method, cur.String(), headers, body)
 		if err != nil {
 			switch {
@@ -285,6 +309,7 @@ func (f *Forwarder) do(ctx context.Context, client string, req *ForwardRequest) 
 		}
 		defer resp.Body.Close()
 		rb, err := io.ReadAll(io.LimitReader(resp.Body, f.app.cfg.Forward.MaxResponseBytes+1))
+		up.SetResponse(responseHeaders(resp.StatusCode, resp.Header), rb)
 		if err != nil {
 			return nil, cur.String(), ferr(502, "UPSTREAM_FAILURE", "reading response: %v", err)
 		}

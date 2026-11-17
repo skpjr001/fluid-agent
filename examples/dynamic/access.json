@@ -1,0 +1,17 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/access.schema.json",
+  "proxy": {
+    "allow": [
+      "127.0.0.1",
+      "10.0.0.0/8",
+      "192.168.1.*"
+    ]
+  },
+  "admin": {
+    "allow": [
+      "127.0.0.1",
+      "::1",
+      "10.8.0.*"
+    ]
+  }
+}

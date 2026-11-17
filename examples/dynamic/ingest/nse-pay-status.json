@@ -12,6 +12,9 @@
   "targets": [
     "https://core.example.internal/api/callbacks/nse"
   ],
+  "allowed_ips": [
+    "192.0.2.*"
+  ],
   "auth": {
     "token": {
       "header": "X-Callback-Token",

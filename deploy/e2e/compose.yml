@@ -81,7 +81,7 @@ services:
   # ---- first run with no mounts: the agent creates its own config ----
   agent-fresh:
     build: ../..
-    networks: { e2e: {} }
+    networks: { e2e: {}, public: {} }   # public: the restricted default must refuse 172.32.0.50
   tester:                   # runs checks from inside the network
     image: docker.io/curlimages/curl:latest
     command: ["sleep", "3600"]

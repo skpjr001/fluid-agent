@@ -1,1 +1,1 @@
-{"$schema": "../../../../schema/ingest.schema.json", "match": {"type": "suffix", "value": "/v1/status"}, "targets": ["http://whoami/"]}
+{"$schema": "../../../../schema/ingest.schema.json", "match": {"type": "suffix", "value": "/v1/status"}, "targets": ["http://whoami/"], "allowed_ips": ["*"]}

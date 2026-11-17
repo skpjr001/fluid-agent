@@ -28,7 +28,9 @@
     "path": "/app/data/fluid-agent.db",
     "retention_days": 14,
     "log_level": "info",
-    "store_event_bodies": true
+    "store_event_bodies": true,
+    "capture_payloads": true,
+    "capture_max_body_bytes": 10485760
   },
   "outbox": {
     "workers": 4,

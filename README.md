@@ -51,6 +51,7 @@ Existing files are never overwritten. Each item is logged as `info` with `kind: 
 | `config.json` (`-config`) | every static setting with its default value and `$schema` |
 | `dynamic/` + `webhooks/`, `ingest/`, `profiles/` | empty collections |
 | `dynamic/proxy.json` | no clients, no allowed hosts, port 443: every proxy request is refused until you add some |
+| `dynamic/access.json` | proxy and console IP allowlists, set to the **restricted default**: loopback and private networks only (local use works; the internet is refused until you add addresses) |
 | `dynamic/admin.json` (mode 0600) | one editor token named `admin`, random 64 hex chars; the value is never logged. With `PROXY_ADMIN_TOKEN` set it is created with no tokens |
 | `data/` (`database.path`) | the SQLite database |
 | `data/acme/` or `acme.cache_dir` (mode 0700) | certificate cache, only when ACME is configured |
@@ -83,6 +84,7 @@ config.json                     static: listeners, database, outbox, telemetry  
 dynamic/
   proxy.json                    proxy clients, allowed hosts/ports, private-address rules  (proxy.schema.json)
   admin.json                    console/API tokens with role viewer | editor               (admin.schema.json)
+  access.json                   client IP allowlists for the proxy and the console         (access.schema.json)
   webhooks/<id>.json            one webhook per file                                       (webhook.schema.json)
   ingest/<id>.json              one callback ingest rule per file                          (ingest.schema.json)
   profiles/<name>.json          one /forward profile per file                              (profile.schema.json)
@@ -91,6 +93,51 @@ dynamic/
 * A file that fails validation is reported (`fluid-agent check`, the Status page, `fluid_config_errors` metric) and **the previous good version keeps running**.
 * `admin.json` is never writable over the API, so a viewer token can never become an editor token. `PROXY_ADMIN_TOKEN` adds one extra editor token (`name: env`).
 * Rotate any token by editing the file — no restart.
+
+## Access: who may call what
+
+**Each webhook and ingest rule decides who may call it**, in its own file, with `allowed_ips`:
+
+```json
+{ "id": "razorpay", "target": "https://dev.internal/cb", "allowed_ips": ["52.66.*.*", "13.232.0.0/16"] }
+{ "id": "github",   "target": "https://ci.internal/hook", "allowed_ips": ["140.82.112-127.*", "192.30.252.0/22"] }
+{ "id": "partner",  "target": "https://dev.internal/p",   "allowed_ips": ["*"], "auth": { "hmac": { "header": "X-Signature", "secret": "…" } } }
+```
+
+(The addresses are illustrative; use each provider's published IP ranges.)
+
+| Rule | Matches |
+|---|---|
+| `*` | anyone |
+| `203.0.113.7`, `2001:db8::1` | one address |
+| `52.66.0.0/16`, `2001:db8::/32` | a CIDR |
+| `52.66.*.*`, `52.66.*` | IPv4 wildcard octets (a trailing `*` covers the rest) |
+| `140.82.112-127.*`, `52.66.10-20.0-127` | IPv4 octet ranges |
+
+* **Restricted by default.** A route without `allowed_ips` accepts only loopback and private networks (`127.0.0.0/8`, `::1`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`): it works locally and inside your network, and internet senders get `403` until you list them. `["*"]` lets anyone in (pair it with `auth`).
+* `source_cidrs` is accepted too (same syntax, existing files keep working); when both are set the lists are combined.
+* Refusals are logged with the route, `source_ip` and `403`, before authentication or reading the body.
+
+**The proxy and the console** have allowlists in `dynamic/access.json`, with the same rules and the same restricted default:
+
+```json
+{
+  "proxy": { "allow": ["10.0.0.0/8", "203.0.113.7"] },
+  "admin": { "allow": ["127.0.0.1", "::1", "10.8.0.*"] }
+}
+```
+
+`"allow": []` refuses everyone. Editors change the proxy list on the console's **Access** page or with `PUT /api/access`; the **admin list is file-only**, so nobody can lock the console or open it to the internet over the API. Loopback health checks (`/healthz`, `/livez`, `/readyz`) always pass.
+
+**Warnings.** At startup, in `fluid-agent check`, on the Status and Access pages, and again when a route or `access.json` changes, the agent explains who may call what: a route on the restricted default (`warn`: internet providers get 403), a route open to `*` without auth (`warn`), `*` on the proxy or console (`warn`), an empty list or a loopback-only console that excludes loopback (`error`), and container NAT that may hide the real client address (`warn`). Behind a reverse proxy, list it in `trusted_proxies` so the real client from `X-Forwarded-For` is checked.
+
+The **Access** page lists every route with its allowed IPs and has an address tester; the same is available over the API:
+
+```bash
+curl -H "$A" $API/access                                          # routes, proxy and console lists, warnings
+curl -H "$A" -X PATCH $API/webhooks/razorpay -d '{"allowed_ips":["52.66.*.*"]}'
+curl -H "$A" -X POST $API/access/test -d '{"ip":"52.66.10.20"}'   # allowed? and which rule matched, per route
+```
 
 ## Outbound: proxy, `/forward` and profiles
 
@@ -130,7 +177,8 @@ Options shared by both (all optional):
 | Field | Meaning |
 |---|---|
 | `methods` | allowed methods (default `POST`, `*` = any) |
-| `source_cidrs` | allowed sender IPs/CIDRs |
+| `allowed_ips` | who may call this route: IPs, CIDRs, IPv4 wildcards (`52.66.*.*`, `52.66.1-5.*`) or `*`; omitted = loopback and private networks only ([Access](#access-who-may-call-what)) |
+| `source_cidrs` | same as `allowed_ips` (kept for existing files); combined with it |
 | `auth.token` | shared token in a header (`{"header","value"}`) |
 | `auth.basic` | HTTP Basic credentials |
 | `auth.hmac` | signature of the raw body: `header`, `secret`, `algorithm` sha1/sha256/sha512, `encoding` hex/base64, `prefix` (e.g. `sha256=` for GitHub). Razorpay: `{"header":"X-Razorpay-Signature","secret":"…"}` |
@@ -157,7 +205,43 @@ fluid-agent logs -by host -direction outbound -since 7d      # summary table
 fluid-agent logs -json -limit 1000 | jq .
 ```
 
-The same filters are available at `GET /api/logs` (cursor: `before_id`) and `GET /api/logs/summary?by=kind|direction|route|client|host|status|source_ip|level|method`, and in the console's Logs page (list + summary, live tail).
+The same filters are available at `GET /api/logs` and `GET /api/logs/summary?by=kind|direction|route|client|host|status|source_ip|level|method`, and in the console's Logs page (list + summary, live updates).
+
+### Full request and response of every API call
+
+Every logged API call also stores what went over the wire, **in full**: request headers (**RQH**), request body (**RQB**), response headers (**RSH**) and response body (**RSB**).
+
+| Call | What is captured |
+|---|---|
+| Webhook / ingest (inbound) | the request as the sender sent it, and the agent's answer (including a passed-through target answer); refused calls (auth, method, IP, rate limit) too |
+| Delivery (outbound) | the request sent to the target (with `target_auth` and `add_headers`) and the target's answer, per attempt |
+| `/forward` (outbound) | the request sent upstream (with profile credentials) and the upstream answer; if the upstream is never reached, the client's `/forward` call and the agent's answer |
+| HTTP proxy (outbound) | the request sent upstream and the answer, bodies copied as they stream |
+| HTTPS tunnel (`CONNECT`) | the CONNECT request and answer only: the traffic inside is end-to-end encrypted |
+
+* Headers include the request line as `:method` and `:path` and the answer's `:status`.
+* Bodies are stored up to `database.capture_max_body_bytes` (default 10 MiB) each; the full size is always recorded and longer bodies are marked truncated. `capture_max_body_bytes: 0` stores headers only, `capture_payloads: false` turns capture off. Stdout logs show body sizes only.
+* **Stored raw.** Editors see every value exactly as sent, credentials included. **Viewer** tokens see the same with credentials masked (`********`): `Authorization`, `Proxy-Authorization`, cookies, `X-Agent-Key`, API-key headers, each route's token header, and any value equal to a secret the agent knows (client and admin tokens, route and target credentials, profile headers). Protect the database file accordingly.
+* `GET /api/logs/{id}` returns one row with its `payload` (`request`/`response`, each with `headers`, `body` or `body_base64`, `size`, `stored`, `truncated`). In the console, open a log row: RQH, RQB, RSH and RSB are shown with copy buttons; rows with a capture are marked `RQ/RS`.
+
+### Tables: column filters, multi-column sort, paging, CSV
+
+Every table in the console (events, deliveries, logs, webhooks, ingest rules, profiles, proxy clients, access) has a filter under each column, sorting by several columns (click a header, Shift+click to add one), page sizes from 10 to 200 with first/previous/next/last, page numbers and jump-to-page, and **Export CSV** of every row that matches the current search, filters and sort. Dates and times are shown in your browser's time zone (named in the column header); the tooltip gives the UTC time.
+
+The list APIs take the same parameters:
+
+```bash
+curl -H "$A" "$API/logs?f.kind==delivery&f.status=5xx&f.ts=24h..&sort=duration_ms:desc,ts:desc&offset=50&limit=50"
+curl -H "$A" "$API/events?f.route==razorpay&f.ts=2026-11-17T00:00:00Z..2026-11-18T00:00:00Z" # {items,total,offset,limit,sort}
+curl -H "$A" -o events.csv "$API/events?format=csv&tz=Asia/Kolkata&f.status==failed"         # every matching row
+```
+
+| Parameter | Meaning |
+|---|---|
+| `f.<column>=value` | text columns: contains (case-insensitive), `=value` for exact; number columns: `500`, `5xx`, `>=400`, `<100`, `200-299`; time columns: `from..to` (RFC3339 or `1h`, `7d` ago), `>=…`, `<…` |
+| `sort=col:desc,col2:asc` | multi-column sort |
+| `offset`, `limit` | paging (limit up to 500); the response has `total` |
+| `format=csv&tz=<IANA zone>` | CSV of every matching row (up to 100,000), times in that zone; cells starting with `= + - @` are prefixed with `'` so spreadsheets do not run them as formulas |
 
 ## Console and API
 
@@ -186,7 +270,7 @@ Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenT
 
 ## Hardening checklist
 
-* Firewall `:8080` to your office/VPN IPs; keep the admin listener on localhost.
+* Give every webhook and ingest rule `allowed_ips` with only its provider's published ranges, and keep `access.json` tight: your application servers for `proxy`, your office/VPN for `admin`. Firewall the ports as well; keep the admin listener on localhost.
 * Keep `allowed_hosts` to the providers you need; never enable `allow_private` unless required.
 * Use long random tokens (`openssl rand -hex 32`); give most people **viewer** tokens. Keep the generated `admin` editor token secret (`admin.json` is created 0600), or replace it.
 * Turn on `auth` for every webhook/ingest rule whose sender supports it (HMAC where offered).

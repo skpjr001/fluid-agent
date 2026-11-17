@@ -8,7 +8,9 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net/http"
+	"net/netip"
 	"os"
 	"slices"
 	"sort"
@@ -72,6 +74,10 @@ func (a *Admin) Handler() http.Handler {
 	route("GET /metrics", false, a.metrics)
 	api.HandleFunc("GET /api/schema/{name}", a.schema) // public: the schemas are published anyway
 
+	route("GET /api/access", false, a.getAccess)
+	route("PUT /api/access", true, a.putAccess)
+	route("POST /api/access/test", false, a.testAccess)
+
 	route("GET /api/proxy", false, a.getProxy)
 	route("PUT /api/proxy", true, a.putProxy)
 	route("POST /api/proxy/clients", true, a.createClient)
@@ -89,6 +95,7 @@ func (a *Admin) Handler() http.Handler {
 	route("POST /api/deliveries/{id}/retry", true, a.retryDelivery)
 	route("POST /api/deliveries/retry-dead", true, a.retryDead)
 	route("GET /api/logs", false, a.listLogs)
+	route("GET /api/logs/{id}", false, a.getLog)
 	route("GET /api/logs/summary", false, a.summaryLogs)
 	route("GET /api/stream", false, a.stream)
 
@@ -162,8 +169,20 @@ func (a *Admin) status(w http.ResponseWriter, r *http.Request) {
 		"active_tunnels": a.app.proxy.tunnels.Load(),
 		"tracing":        a.app.tracing,
 		"environment":    map[string]any{"container": a.app.env.Container, "systemd": a.app.env.Systemd},
-		"deployment":     orEmpty(a.app.notes),
+		"deployment":     a.currentNotes(),
 	})
+}
+
+// currentNotes is the startup notes with the access section recomputed, so
+// the Status page reflects access.json changes made since startup.
+func (a *Admin) currentNotes() []DeployNote {
+	out := []DeployNote{}
+	for _, n := range a.app.notes {
+		if n.Topic != "access" {
+			out = append(out, n)
+		}
+	}
+	return append(out, accessNotes(a.app.cfg, a.app.store.snap.Load(), a.app.env)...)
 }
 
 func (a *Admin) reload(w http.ResponseWriter, r *http.Request) {
@@ -200,9 +219,15 @@ type proxyView struct {
 }
 
 type clientView struct {
-	Name     string `json:"name"`
-	Token    string `json:"token"` // masked except on create/rotate
-	Disabled bool   `json:"disabled"`
+	Name      string    `json:"name"`
+	Token     string    `json:"token"` // masked except on create/rotate
+	Disabled  bool      `json:"disabled"`
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
+}
+
+func viewClient(c Client, token string) clientView {
+	return clientView{Name: c.Name, Token: token, Disabled: c.Disabled, CreatedAt: c.CreatedAt, UpdatedAt: c.UpdatedAt}
 }
 
 func maskToken(t string) string {
@@ -217,9 +242,132 @@ func (a *Admin) getProxy(w http.ResponseWriter, r *http.Request) {
 	v := proxyView{AllowedHosts: orEmpty(pc.AllowedHosts), AllowedPorts: pc.AllowedPorts,
 		AllowPrivate: pc.AllowPrivate, PrivateAllowlist: orEmpty(pc.PrivateAllowlist), Clients: []clientView{}}
 	for _, c := range pc.Clients {
-		v.Clients = append(v.Clients, clientView{Name: c.Name, Token: maskToken(c.Token), Disabled: c.Disabled})
+		v.Clients = append(v.Clients, viewClient(c, maskToken(c.Token)))
 	}
 	writeJSON(w, 200, v)
+}
+
+// ---------- access allowlists ----------
+
+type accessView struct {
+	Proxy        []string      `json:"proxy"`
+	Admin        []string      `json:"admin"`
+	Routes       []routeAccess `json:"routes"`       // per webhook / ingest rule allowed_ips
+	Default      []string      `json:"default"`      // what an omitted list means
+	ClientIP     string        `json:"client_ip"`    // the caller's address as the agent sees it
+	AdminLocked  bool          `json:"admin_locked"` // admin list is file-only
+	TrustedProxy []string      `json:"trusted_proxies"`
+	Notes        []DeployNote  `json:"notes"`
+}
+
+type routeAccess struct {
+	Source     string    `json:"source"` // webhook | ingest
+	ID         string    `json:"id"`
+	Disabled   bool      `json:"disabled,omitempty"`
+	AllowedIPs []string  `json:"allowed_ips"` // allowed_ips + source_cidrs, or the default
+	Default    bool      `json:"default"`     // no allowed_ips/source_cidrs: restricted default applies
+	Auth       bool      `json:"auth"`
+	UpdatedAt  time.Time `json:"updated_at,omitzero"`
+	opts       *RouteOptions
+}
+
+// routeAccessList lists every webhook and ingest rule with its senders.
+func (a *Admin) routeAccessList() []routeAccess {
+	snap := a.app.store.snap.Load()
+	out := []routeAccess{}
+	add := func(src, id string, disabled bool, updated time.Time, o *RouteOptions) {
+		ips := o.allowedIPs()
+		if o.restrictedDefault() {
+			ips = defaultAllow
+		}
+		out = append(out, routeAccess{Source: src, ID: id, Disabled: disabled, AllowedIPs: ips,
+			Default: o.restrictedDefault(), Auth: o.Auth != nil, UpdatedAt: updated, opts: o})
+	}
+	ids := slices.Sorted(maps.Keys(snap.webhooks))
+	for _, id := range ids {
+		w := snap.webhooks[id]
+		add("webhook", id, w.Disabled, w.UpdatedAt, &w.RouteOptions)
+	}
+	for _, r := range snap.ingest {
+		add("ingest", r.ID, r.Disabled, r.UpdatedAt, &r.RouteOptions)
+	}
+	return out
+}
+
+func (a *Admin) getAccess(w http.ResponseWriter, r *http.Request) {
+	ac := a.app.store.Access()
+	writeJSON(w, 200, accessView{Proxy: ac.Proxy.Allow, Admin: ac.Admin.Allow, Routes: a.routeAccessList(),
+		Default: defaultAllow, ClientIP: ClientIP(r, a.app.cfg.trusted).String(), AdminLocked: true,
+		TrustedProxy: orEmpty(a.app.cfg.TrustedProxies),
+		Notes:        orEmpty(accessNotes(a.app.cfg, a.app.store.snap.Load(), a.app.env))})
+}
+
+// putAccess changes the proxy allowlist. The admin list can only be changed
+// in the file, so an editor can neither lock everyone out of the console nor
+// open it to the internet over the API. Webhooks and ingest rules carry their
+// own allowed_ips and are edited like any other field of theirs.
+func (a *Admin) putAccess(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Proxy *[]string `json:"proxy"`
+		Admin *[]string `json:"admin"`
+	}
+	if err := decodeStrict(r.Body, &in); err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	cur := a.app.store.Access()
+	if in.Admin != nil && !slices.Equal(*in.Admin, cur.Admin.Allow) {
+		errJSON(w, 403, "the admin allowlist is file-only: edit access.json in the dynamic config directory")
+		return
+	}
+	next := &AccessConfig{
+		Proxy: AccessList{Allow: slices.Clone(cur.Proxy.Allow)},
+		Admin: AccessList{Allow: slices.Clone(cur.Admin.Allow)},
+	}
+	if in.Proxy != nil {
+		next.Proxy.Allow = orEmpty(*in.Proxy)
+	}
+	if err := a.app.store.SaveAccess(next); err != nil {
+		saveErr(w, err)
+		return
+	}
+	a.getAccess(w, r)
+}
+
+// testAccess answers "would this address be let in?" for the proxy, the
+// console and every webhook and ingest rule.
+func (a *Admin) testAccess(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		IP string `json:"ip"`
+	}
+	if err := decodeStrict(r.Body, &in); err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(in.IP))
+	if err != nil {
+		errJSON(w, 400, "not an IP address")
+		return
+	}
+	type verdict struct {
+		Source  string `json:"source,omitempty"`
+		ID      string `json:"id,omitempty"`
+		Allowed bool   `json:"allowed"`
+		Rule    string `json:"rule,omitempty"`
+	}
+	ac := a.app.store.Access()
+	out := map[string]any{"ip": ip.Unmap().String()}
+	for _, name := range []string{"proxy", "admin"} {
+		rule, ok := ac.list(name).list.Match(ip)
+		out[name] = verdict{Allowed: ok, Rule: rule}
+	}
+	routes := []verdict{}
+	for _, ra := range a.routeAccessList() {
+		rule, ok := ra.opts.ips.Match(ip)
+		routes = append(routes, verdict{Source: ra.Source, ID: ra.ID, Allowed: ok, Rule: rule})
+	}
+	out["routes"] = routes
+	writeJSON(w, 200, out)
 }
 
 func orEmpty[T any](s []T) []T {
@@ -279,12 +427,14 @@ func (a *Admin) createClient(w http.ResponseWriter, r *http.Request) {
 	if in.Token == "" {
 		in.Token = randomToken()
 	}
+	now := time.Now().UTC().Truncate(time.Second)
+	in.CreatedAt, in.UpdatedAt = now, now
 	pc.Clients = append(pc.Clients, in)
 	if err := a.app.store.SaveProxy(pc); err != nil {
 		saveErr(w, err)
 		return
 	}
-	writeJSON(w, 201, clientView{Name: in.Name, Token: in.Token, Disabled: in.Disabled})
+	writeJSON(w, 201, viewClient(in, in.Token))
 }
 
 func (a *Admin) withClient(w http.ResponseWriter, name string, fn func(c *Client)) (*Client, bool) {
@@ -292,6 +442,7 @@ func (a *Admin) withClient(w http.ResponseWriter, name string, fn func(c *Client
 	for i := range pc.Clients {
 		if pc.Clients[i].Name == name {
 			fn(&pc.Clients[i])
+			pc.Clients[i].UpdatedAt = time.Now().UTC().Truncate(time.Second)
 			if err := a.app.store.SaveProxy(pc); err != nil {
 				saveErr(w, err)
 				return nil, false
@@ -312,14 +463,14 @@ func (a *Admin) patchClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if c, ok := a.withClient(w, r.PathValue("name"), func(c *Client) { c.Disabled = *in.Disabled }); ok {
-		writeJSON(w, 200, clientView{Name: c.Name, Token: maskToken(c.Token), Disabled: c.Disabled})
+		writeJSON(w, 200, viewClient(*c, maskToken(c.Token)))
 	}
 }
 
 func (a *Admin) rotateClient(w http.ResponseWriter, r *http.Request) {
 	tok := randomToken()
 	if c, ok := a.withClient(w, r.PathValue("name"), func(c *Client) { c.Token = tok }); ok {
-		writeJSON(w, 200, clientView{Name: c.Name, Token: tok, Disabled: c.Disabled})
+		writeJSON(w, 200, viewClient(*c, tok))
 	}
 }
 

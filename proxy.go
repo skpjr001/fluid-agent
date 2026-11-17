@@ -120,7 +120,8 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Proxy-Authenticate", `Basic realm="fluid-agent"`)
 		http.Error(w, "proxy auth required", http.StatusProxyAuthRequired)
 		fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", kindOf(r), "result", "unauthorized")
-		slog.Warn("proxy auth failed", "kind", "auth", "direction", "outbound", "source_ip", src, "url", r.Host, "status", 407)
+		slog.Warn("proxy auth failed", "kind", "auth", "direction", "outbound", "source_ip", src, "url", r.Host, "status", 407,
+			"capture", fp.app.quickCapture(r, 407, w.Header(), "proxy auth required\n"))
 		return
 	}
 
@@ -136,7 +137,8 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "destination not allowed", http.StatusForbidden)
 		fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", kindOf(r), "result", "denied")
 		slog.Warn("proxy denied", "kind", "proxy_denied", "direction", "outbound", "client", client,
-			"source_ip", src, "host", host, "url", target, "status", 403)
+			"source_ip", src, "host", host, "url", target, "status", 403,
+			"capture", fp.app.quickCapture(r, 403, w.Header(), "destination not allowed\n"))
 		return
 	}
 
@@ -153,6 +155,12 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	out := r.Clone(ctx)
 	out.RequestURI = ""
 	stripHop(out.Header)
+	// Capture the call exactly as sent upstream and as answered (bodies are
+	// copied while they stream through).
+	c := fp.app.newCapture()
+	defer c.Finish()
+	c.SetRequest(requestHeaders(out.Method, out.URL.String(), out.Host, out.Header), nil)
+	out.Body = c.TeeRequestBody(out.Body)
 	resp, err := fp.tr.RoundTrip(out)
 	if err != nil {
 		code := http.StatusBadGateway
@@ -163,7 +171,7 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", "http", "result", "error")
 		slog.Error("proxy upstream failed", "kind", "proxy_http", "direction", "outbound", "client", client,
 			"source_ip", src, "method", r.Method, "host", host, "url", r.URL.String(), "status", code,
-			"ms", time.Since(start).Milliseconds(), "err", err)
+			"ms", time.Since(start).Milliseconds(), "err", err, "capture", c)
 		endSpan(span, code, err)
 		return
 	}
@@ -173,11 +181,13 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header()[k] = v
 	}
 	w.WriteHeader(resp.StatusCode)
-	n, _ := io.Copy(w, resp.Body)
+	c.SetResponse(responseHeaders(resp.StatusCode, resp.Header), nil)
+	n, _ := io.Copy(w, c.TeeResponseBody(resp.Body))
+	c.Finish()
 	fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", "http", "result", "ok")
 	slog.Info("proxy http", "kind", "proxy_http", "direction", "outbound", "client", client, "source_ip", src,
 		"method", r.Method, "host", host, "url", r.URL.String(), "status", resp.StatusCode,
-		"bytes_in", r.ContentLength, "bytes_out", n, "ms", time.Since(start).Milliseconds())
+		"bytes_in", r.ContentLength, "bytes_out", n, "ms", time.Since(start).Milliseconds(), "capture", c)
 	endSpan(span, resp.StatusCode, nil)
 }
 
@@ -225,7 +235,8 @@ func (fp *ForwardProxy) tunnel(w http.ResponseWriter, r *http.Request, dest, cli
 		http.Error(w, "dial failed", code)
 		fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", "connect", "result", "error")
 		slog.Error("tunnel dial failed", "kind", "proxy_connect", "direction", "outbound", "client", client,
-			"source_ip", src, "host", host, "url", dest, "status", code, "err", err)
+			"source_ip", src, "host", host, "url", dest, "status", code, "err", err,
+			"capture", fp.app.quickCapture(r, code, w.Header(), "dial failed\n"))
 		endSpan(span, code, err)
 		return
 	}
@@ -278,6 +289,8 @@ func (fp *ForwardProxy) tunnel(w http.ResponseWriter, r *http.Request, dest, cli
 	fp.app.metrics.Inc("fluid_proxy_requests_total", "kind", "connect", "result", "ok")
 	slog.Info("proxy tunnel", "kind", "proxy_connect", "direction", "outbound", "client", client, "source_ip", src,
 		"method", "CONNECT", "host", host, "url", dest, "status", 200, "bytes_in", sent, "bytes_out", recv,
-		"ms", time.Since(start).Milliseconds())
+		"ms", time.Since(start).Milliseconds(), "encrypted", true,
+		// HTTPS inside a tunnel is end-to-end encrypted: only the CONNECT exchange can be captured.
+		"capture", fp.app.quickCapture(r, 200, nil, ""))
 	endSpan(span, 200, nil)
 }

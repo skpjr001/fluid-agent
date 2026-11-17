@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 var levelByName = map[string]slog.Level{
@@ -37,6 +40,24 @@ type LogRow struct {
 	Route      string         `json:"route,omitempty"`
 	TraceID    string         `json:"trace_id,omitempty"`
 	Attrs      map[string]any `json:"attrs,omitempty"`
+	HasPayload bool           `json:"has_payload,omitempty"` // request/response captured: GET /api/logs/{id}
+
+	capture *Capture // written with the row once the exchange finishes
+}
+
+// PayloadPart is one side of a captured exchange.
+type PayloadPart struct {
+	Headers    http.Header `json:"headers"`
+	Body       string      `json:"body,omitempty"`        // UTF-8 bodies
+	BodyBase64 string      `json:"body_base64,omitempty"` // binary bodies
+	Size       int64       `json:"size"`                  // full size on the wire
+	Stored     int64       `json:"stored"`                // bytes kept (capture_max_body_bytes)
+	Truncated  bool        `json:"truncated,omitempty"`
+}
+
+type LogPayload struct {
+	Request  *PayloadPart `json:"request,omitempty"`  // RQH + RQB
+	Response *PayloadPart `json:"response,omitempty"` // RSH + RSB
 }
 
 // LogSink batches rows into SQLite on a background goroutine so request
@@ -136,7 +157,8 @@ func (s *LogSink) insert(rows []*LogRow) error {
 		return err
 	}
 	st, err := tx.Prepare(`INSERT INTO logs (ts, level, kind, direction, msg, client, method, host, url, status,
-		bytes_in, bytes_out, duration_ms, source_ip, route, trace_id, attrs) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+		bytes_in, bytes_out, duration_ms, source_ip, route, trace_id, attrs,
+		rq_headers, rq_body, rq_size, rs_headers, rs_body, rs_size) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		tx.Rollback()
 		return err
@@ -148,9 +170,23 @@ func (s *LogSink) insert(rows []*LogRow) error {
 			b, _ := json.Marshal(r.Attrs)
 			attrs = string(b)
 		}
+		var rqh, rqb, rqs, rsh, rsb, rss any
+		if r.capture != nil {
+			c := r.capture.snapshot()
+			if c.reqHeaders != nil {
+				b, _ := json.Marshal(c.reqHeaders)
+				rqh, rqb, rqs = string(b), c.reqBody, c.reqSize
+			}
+			if c.respHeaders != nil {
+				b, _ := json.Marshal(c.respHeaders)
+				rsh, rsb, rss = string(b), c.respBody, c.respSize
+			}
+			r.HasPayload = rqh != nil || rsh != nil
+		}
 		res, err := st.Exec(r.TS.UnixMilli(), r.Level, r.Kind, nullStr(r.Direction), r.Msg, nullStr(r.Client), nullStr(r.Method),
 			nullStr(r.Host), nullStr(r.URL), nullInt(int64(r.Status)), nullInt(r.BytesIn), nullInt(r.BytesOut),
-			nullInt(r.DurationMs), nullStr(r.SourceIP), nullStr(r.Route), nullStr(r.TraceID), attrs)
+			nullInt(r.DurationMs), nullStr(r.SourceIP), nullStr(r.Route), nullStr(r.TraceID), attrs,
+			rqh, rqb, rqs, rsh, rsb, rss)
 		if err != nil {
 			tx.Rollback()
 			return err
@@ -214,6 +250,12 @@ func (h *teeHandler) Handle(ctx context.Context, r slog.Record) error {
 		row.TS = time.Now()
 	}
 	set := func(a slog.Attr) {
+		if a.Key == "capture" {
+			if c, ok := a.Value.Any().(*Capture); ok && c != nil {
+				row.capture = c
+			}
+			return
+		}
 		v := a.Value.Resolve()
 		switch a.Key {
 		case "kind":
@@ -258,7 +300,11 @@ func (h *teeHandler) Handle(ctx context.Context, r slog.Record) error {
 	if row.TraceID == "" {
 		row.TraceID = traceIDFrom(ctx)
 	}
-	h.sink.enqueue(row)
+	if row.capture != nil {
+		row.capture.whenDone(func() { h.sink.enqueue(row) }) // stored once the body has been fully seen
+	} else {
+		h.sink.enqueue(row)
+	}
 	return err
 }
 
@@ -304,13 +350,13 @@ type LogQuery struct {
 	Text      string // substring of msg, url or attrs
 	BeforeID  int64  // cursor: only rows with id < BeforeID
 	Limit     int
+	List      ListParams // column filters, sort, offset (API)
 }
 
 var levelOrder = []string{"debug", "info", "warn", "error"}
 
 func (q LogQuery) where() (string, []any, error) {
-	var conds []string
-	var args []any
+	conds, args := append([]string(nil), q.List.Conds...), append([]any(nil), q.List.Args...)
 	add := func(c string, a ...any) { conds = append(conds, c); args = append(args, a...) }
 	if len(q.Kinds) > 0 {
 		add("kind IN ("+strings.TrimSuffix(strings.Repeat("?,", len(q.Kinds)), ",")+")", toAny(q.Kinds)...)
@@ -388,6 +434,44 @@ func toAny[T any](xs []T) []any {
 	return out
 }
 
+// GetLogPayload returns the captured request/response of one log row.
+func GetLogPayload(ctx context.Context, db *DB, id int64) (*LogPayload, error) {
+	var rqh, rsh *string
+	var rqb, rsb []byte
+	var rqs, rss *int64
+	err := db.QueryRowContext(ctx, `SELECT rq_headers, rq_body, rq_size, rs_headers, rs_body, rs_size FROM logs WHERE id = ?`, id).
+		Scan(&rqh, &rqb, &rqs, &rsh, &rsb, &rss)
+	if err != nil {
+		return nil, err
+	}
+	part := func(h *string, b []byte, n *int64) *PayloadPart {
+		if h == nil {
+			return nil
+		}
+		p := &PayloadPart{Headers: http.Header{}, Size: derefInt(n), Stored: int64(len(b))}
+		json.Unmarshal([]byte(*h), &p.Headers)
+		p.Truncated = p.Size > p.Stored
+		if utf8.Valid(b) {
+			p.Body = string(b)
+		} else {
+			p.BodyBase64 = base64.StdEncoding.EncodeToString(b)
+		}
+		return p
+	}
+	return &LogPayload{Request: part(rqh, rqb, rqs), Response: part(rsh, rsb, rss)}, nil
+}
+
+// CountLogs is the total for the same filters (for paging).
+func CountLogs(ctx context.Context, db *DB, q LogQuery) (int64, error) {
+	where, args, err := q.where()
+	if err != nil {
+		return 0, err
+	}
+	var n int64
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*) FROM logs`+where, args...).Scan(&n)
+	return n, err
+}
+
 // QueryLogs returns rows newest first and the cursor for the next page (0 = end).
 func QueryLogs(ctx context.Context, db *DB, q LogQuery) ([]LogRow, int64, error) {
 	if q.Limit <= 0 || q.Limit > 1000 {
@@ -397,9 +481,14 @@ func QueryLogs(ctx context.Context, db *DB, q LogQuery) ([]LogRow, int64, error)
 	if err != nil {
 		return nil, 0, err
 	}
+	order := q.List.Order
+	if order == "" {
+		order = "id DESC"
+	}
 	rows, err := db.QueryContext(ctx, `SELECT id, ts, level, kind, direction, msg, client, method, host, url, status,
-		bytes_in, bytes_out, duration_ms, source_ip, route, trace_id, attrs FROM logs`+where+
-		` ORDER BY id DESC LIMIT ?`, append(args, q.Limit)...)
+		bytes_in, bytes_out, duration_ms, source_ip, route, trace_id, attrs,
+		(rq_headers IS NOT NULL OR rs_headers IS NOT NULL) FROM logs`+where+
+		` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(args, q.Limit, q.List.Offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -411,7 +500,7 @@ func QueryLogs(ctx context.Context, db *DB, q LogQuery) ([]LogRow, int64, error)
 		var dir, client, method, host, u, src, route, trace, attrs *string
 		var status, bin, bout, dur *int64
 		if err := rows.Scan(&r.ID, &ts, &r.Level, &r.Kind, &dir, &r.Msg, &client, &method, &host, &u, &status,
-			&bin, &bout, &dur, &src, &route, &trace, &attrs); err != nil {
+			&bin, &bout, &dur, &src, &route, &trace, &attrs, &r.HasPayload); err != nil {
 			return nil, 0, err
 		}
 		r.TS = time.UnixMilli(ts)

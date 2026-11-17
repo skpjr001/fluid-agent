@@ -50,14 +50,23 @@
       "uniqueItems": true,
       "description": "Allowed methods; default [\"POST\"]; \"*\" allows any."
     },
+    "allowed_ips": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "\"*\" (anyone), an IP (203.0.113.7, 2001:db8::1), a CIDR (52.66.0.0/16, 2001:db8::/32), or an IPv4 wildcard: \"*\" or a-b per octet (52.66.*.*, 52.66.*, 52.66.1-5.*)."
+      },
+      "description": "Who may call this route. Omitted: loopback and private networks only (the restricted default), so internet senders get 403 until listed here. [\"*\"] allows anyone (use auth). Combined with source_cidrs."
+    },
     "source_cidrs": {
       "type": "array",
       "items": {
         "type": "string",
-        "minLength": 2,
-        "description": "IP address or CIDR, e.g. \"52.66.0.0/16\"."
+        "minLength": 1,
+        "description": "\"*\" (anyone), an IP (203.0.113.7, 2001:db8::1), a CIDR (52.66.0.0/16, 2001:db8::/32), or an IPv4 wildcard: \"*\" or a-b per octet (52.66.*.*, 52.66.*, 52.66.1-5.*)."
       },
-      "description": "Only accept senders from these IPs/CIDRs."
+      "description": "Same as allowed_ips (kept for existing files); both lists are combined."
     },
     "auth": {
       "$ref": "#/$defs/inboundAuth"

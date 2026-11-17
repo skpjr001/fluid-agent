@@ -102,6 +102,8 @@ func bootstrap(cfgPath string, cfg *StaticConfig, cfgExisted, envAdminToken bool
 	writeNew(filepath.Join(cfg.DynamicDir, "proxy.json"), "proxy config", &ProxyConfig{
 		Schema: SchemaBase + "proxy.schema.json", Clients: []Client{}, AllowedHosts: []string{}, AllowedPorts: []int{443},
 	}, 0o640)
+	writeNew(filepath.Join(cfg.DynamicDir, "access.json"), "access allowlists",
+		defaultAccessFile(), 0o640)
 	adminPath := filepath.Join(cfg.DynamicDir, "admin.json")
 	admin := &AdminConfig{Schema: SchemaBase + "admin.schema.json", Tokens: []AdminToken{}}
 	if !envAdminToken {

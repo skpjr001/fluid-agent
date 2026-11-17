@@ -63,6 +63,8 @@ const ICONS = {
   down: "M12 5v14M6 13l6 6 6-6",
   up: "M12 19V5M6 11l6-6 6 6",
   logs: "M5 4h14v16H5zM8 8h8M8 12h8M8 16h5",
+  download: "M12 4v11M7 10l5 5 5-5M5 20h14",
+  lock: "M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4",
 };
 function icon(name) {
   const s = document.createElementNS(SVGNS, "svg");
@@ -112,9 +114,20 @@ function ago(ts) {
   if (d < 86400) return Math.floor(d / 3600) + "h ago";
   return Math.floor(d / 86400) + "d ago";
 }
+// ---- date & time: always shown in the viewer's local time zone ----
+const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+const TZ_SHORT = (() => {
+  try { return new Intl.DateTimeFormat(undefined, { timeZoneName: "short" }).formatToParts(new Date()).find((x) => x.type === "timeZoneName").value; }
+  catch { return TZ; }
+})();
+const DT_FMT = new Intl.DateTimeFormat(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
+function validTime(ts) { if (!ts) return null; const d = new Date(ts); return isNaN(d) || d.getFullYear() < 2000 ? null : d; }
+function fmtDT(ts) { const d = validTime(ts); return d ? DT_FMT.format(d) + " " + TZ_SHORT : ""; }
+// when renders a local date-time; the tooltip adds "5m ago" and UTC.
 function when(ts) {
-  const t = new Date(ts);
-  return h("span", { title: t.toLocaleString() }, ago(ts));
+  const d = validTime(ts);
+  if (!d) return h("span", { class: "muted" }, "—");
+  return h("span", { class: "dt", title: ago(ts) + " · " + d.toISOString().replace("T", " ").replace(/\.\d+Z$/, " UTC") }, DT_FMT.format(d));
 }
 function bytes(n) {
   if (!n) return "0 B";
@@ -159,6 +172,34 @@ async function api(method, path, body) {
   if (!resp.ok) throw new ApiError(resp.status, (data && data.error) || resp.statusText);
   return data;
 }
+
+// download fetches a file with the session token and saves it.
+async function download(path, fallbackName) {
+  const resp = await fetch(BASE + path, { headers: { Authorization: "Bearer " + state.token } });
+  if (resp.status === 401) { logout(); throw new ApiError(401, "Session expired"); }
+  if (!resp.ok) { let m = resp.statusText; try { m = (await resp.json()).error || m; } catch { /* not JSON */ } throw new ApiError(resp.status, m); }
+  const name = (/filename="([^"]+)"/.exec(resp.headers.get("Content-Disposition") || "") || [])[1] || fallbackName;
+  saveBlob(await resp.blob(), name);
+}
+function saveBlob(blob, name) {
+  const u = URL.createObjectURL(blob);
+  const a = h("a", { href: u, download: name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 10000);
+}
+// csvCell quotes a value and neutralises spreadsheet formulas (= + - @).
+function csvCell(v) {
+  let s = v === null || v === undefined ? "" : Array.isArray(v) ? v.join(" ") : String(v);
+  if (typeof v === "string" && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+// isoLocal formats a time with the viewer's UTC offset: 2026-11-17T20:31:43+05:30
+function isoLocal(ts) {
+  const d = validTime(ts); if (!d) return "";
+  const p = (n) => String(Math.abs(n)).padStart(2, "0"), off = -d.getTimezoneOffset();
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}${off >= 0 ? "+" : "-"}${p(Math.trunc(off / 60))}:${p(off % 60)}`;
+}
+function stamp() { return isoLocal(new Date()).slice(0, 19).replace(/[-:]/g, "").replace("T", "-"); }
 
 const isEditor = () => state.me && state.me.role === "editor";
 
@@ -244,6 +285,7 @@ const NAV = [
     { path: "/ingest", label: "Ingest rules", icon: "route" },
     { path: "/profiles", label: "Forward profiles", icon: "send" },
     { path: "/proxy", label: "Proxy & clients", icon: "shield" },
+    { path: "/access", label: "Access (IP allowlists)", icon: "lock" },
   ] },
   { group: "System", items: [
     { path: "/system", label: "Status", icon: "gear", badge: "config" },
@@ -259,6 +301,7 @@ const ROUTES = [
   [/^\/ingest$/, () => pageResources(RES.ingest)],
   [/^\/profiles$/, () => pageResources(RES.profiles)],
   [/^\/proxy$/, () => pageProxy()],
+  [/^\/access$/, () => pageAccess()],
   [/^\/system$/, () => pageSystem()],
 ];
 
@@ -394,6 +437,312 @@ function props(pairs) {
   return h("dl", { class: "props" }, pairs.filter(Boolean).map(([k, v]) => [h("dt", {}, k), h("dd", {}, v ?? "—")]));
 }
 
+// ---------------------------------------------------------------- data table
+//
+// dataTable({ id, cols, fetch | rows, onRow, empty, pageSize, defaultSort })
+//   col: { key, label, render, v (value for client-side sort/filter), sort, filter, num, time }
+//   filter: "text" | "num" | "time" | [[value, label], ...] (exact match)
+//   fetch({offset, limit, sort, filters}) -> {items, total}   (server-side paging)
+//   rows: [...]                                               (client-side paging)
+// Click a header to sort, Shift+click to add a secondary sort. State lives in the URL.
+
+const PAGE_SIZES = [10, 25, 50, 100, 200];
+const TIME_PRESETS = [["", "Any time"], ["15m..", "Last 15 min"], ["1h..", "Last hour"], ["24h..", "Last 24 h"], ["7d..", "Last 7 days"], ["30d..", "Last 30 days"], ["custom", "Custom range…"]];
+const DUR = { s: 1e3, m: 6e4, h: 36e5, d: 864e5 };
+
+function parseInstantJS(s) {
+  const m = /^(\d+)([smhd])$/.exec(s);
+  if (m) return Date.now() - m[1] * DUR[m[2]];
+  const t = Date.parse(s);
+  return isNaN(t) ? null : t;
+}
+function matchTime(ts, f) {
+  const t = new Date(ts).getTime();
+  if (!validTime(ts)) return false;
+  const [a, b] = f.includes("..") ? f.split("..") : [f, ""];
+  const lo = a ? parseInstantJS(a) : null, hi = b ? parseInstantJS(b) : null;
+  return (lo === null || t >= lo) && (hi === null || t < hi);
+}
+function matchNum(v, f) {
+  if (v === "" || v === null || v === undefined) return false;
+  v = Number(v); f = f.replace(/\s/g, "");
+  let m;
+  if ((m = /^([1-9])xx$/i.exec(f))) return v >= m[1] * 100 && v < m[1] * 100 + 100;
+  if ((m = /^(>=|<=|>|<|=)(-?\d+(?:\.\d+)?)$/.exec(f))) {
+    const n = Number(m[2]);
+    return { ">=": v >= n, "<=": v <= n, ">": v > n, "<": v < n, "=": v === n }[m[1]];
+  }
+  if ((m = /^(\d+)-(\d+)$/.exec(f))) return v >= +m[1] && v <= +m[2];
+  return String(v) === f;
+}
+function cellValue(c, r) { const v = c.v ? c.v(r) : r[c.key]; return v === undefined || v === null ? "" : v; }
+function cmp(a, b) {
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  const ta = Date.parse(a), tb = Date.parse(b);
+  if (typeof a === "string" && typeof b === "string" && /^\d{4}-\d\d-\d\dT/.test(a) && /^\d{4}-\d\d-\d\dT/.test(b)) return ta - tb;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+}
+// datetime-local input value <-> ISO (UTC) string
+function localInputToISO(v) { return v ? new Date(v).toISOString() : ""; }
+function isoToLocalInput(s) {
+  const d = validTime(s); if (!d) return "";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function dataTable(o) {
+  const P = o.id ? o.id + "." : "";
+  const url = new URLSearchParams(location.search);
+  const st = {
+    page: Math.max(1, parseInt(url.get(P + "page"), 10) || 1),
+    size: PAGE_SIZES.includes(+url.get(P + "size")) ? +url.get(P + "size") : (o.pageSize || 25),
+    sort: (url.get(P + "sort") ?? (o.defaultSort || []).join(",")).split(",").filter(Boolean)
+      .map((x) => { const [k, d] = x.split(":"); return { k, d: d === "desc" ? "desc" : "asc" }; }),
+    filters: { ...(o.initialFilters || {}) },
+  };
+  for (const c of o.cols) if (c.filter) { const v = url.get(P + "f." + c.key); if (v) st.filters[c.key] = v; }
+  let data = { items: [], total: 0 }, seq = 0;
+
+  const save = () => {
+    const q = new URLSearchParams(location.search);
+    for (const k of [...q.keys()]) if (k.startsWith(P + "f.") || [P + "page", P + "size", P + "sort"].includes(k)) q.delete(k);
+    if (st.page > 1) q.set(P + "page", st.page);
+    if (st.size !== (o.pageSize || 25)) q.set(P + "size", st.size);
+    const srt = st.sort.map((x) => x.k + ":" + x.d).join(",");
+    if (srt !== (o.defaultSort || []).join(",")) q.set(P + "sort", srt);
+    for (const [k, v] of Object.entries(st.filters)) if (v) q.set(P + "f." + k, v);
+    const qs = q.toString();
+    history.replaceState(null, "", location.pathname + (qs ? "?" + qs : ""));
+  };
+
+  // header: labels (sortable) + one filter control per column, built once
+  const thFor = new Map();
+  const headRow = h("tr", {}, o.cols.map((c) => {
+    const label = [c.label, c.time ? h("span", { class: "tz", title: "Shown in your time zone: " + TZ }, TZ_SHORT) : null];
+    if (!c.sort) return h("th", { class: c.num ? "num" : "" }, label);
+    const ind = h("span", { class: "sort-ind" });
+    const th = h("th", { class: "sortable" + (c.num ? " num" : ""), tabindex: "0", "aria-sort": "none",
+      title: "Click to sort, Shift+click to add a secondary sort" }, label, ind);
+    const toggle = (multi) => {
+      const i = st.sort.findIndex((x) => x.k === c.key);
+      if (!multi) {
+        const cur = i >= 0 ? st.sort[i].d : null;
+        st.sort = cur === null ? [{ k: c.key, d: c.time || c.num ? "desc" : "asc" }] : cur === (c.time || c.num ? "desc" : "asc")
+          ? [{ k: c.key, d: c.time || c.num ? "asc" : "desc" }] : [];
+      } else if (i < 0) st.sort.push({ k: c.key, d: c.time || c.num ? "desc" : "asc" });
+      else if (st.sort[i].d === (c.time || c.num ? "desc" : "asc")) st.sort[i].d = st.sort[i].d === "asc" ? "desc" : "asc";
+      else st.sort.splice(i, 1);
+      st.page = 1; load();
+    };
+    th.addEventListener("click", (e) => toggle(e.shiftKey));
+    th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(e.shiftKey); } });
+    thFor.set(c.key, { th, ind });
+    return th;
+  }));
+  let timer;
+  const setFilter = (k, v, now) => {
+    clearTimeout(timer);
+    const apply = () => { if ((st.filters[k] || "") === v) return; if (v) st.filters[k] = v; else delete st.filters[k]; st.page = 1; load(); };
+    if (now) apply(); else timer = setTimeout(apply, 350);
+  };
+  const filterCell = (c) => {
+    if (!c.filter) return h("th", {});
+    const cur = st.filters[c.key] || "";
+    if (Array.isArray(c.filter)) {
+      return h("th", {}, select([["", "All"], ...c.filter.map(([v, t]) => ["=" + v, t])], cur, (v) => setFilter(c.key, v, true), "Filter " + c.label));
+    }
+    if (c.filter === "time") {
+      const from = h("input", { type: "datetime-local", "aria-label": c.label + " from" });
+      const to = h("input", { type: "datetime-local", "aria-label": c.label + " to" });
+      const custom = h("div", { class: "dt-range hidden" }, from, h("span", { class: "muted" }, "to"), to);
+      const isPreset = TIME_PRESETS.some(([v]) => v === cur);
+      const sel = select(TIME_PRESETS, isPreset ? cur : cur ? "custom" : "", (v) => {
+        custom.classList.toggle("hidden", v !== "custom");
+        if (v !== "custom") setFilter(c.key, v, true); else from.focus();
+      }, "Filter " + c.label);
+      if (cur && !isPreset) {
+        const [a, b] = cur.split("..");
+        from.value = isoToLocalInput(a); to.value = isoToLocalInput(b);
+        custom.classList.remove("hidden");
+      }
+      const applyRange = () => {
+        const a = localInputToISO(from.value), b = localInputToISO(to.value);
+        setFilter(c.key, a || b ? a + ".." + b : "", true);
+      };
+      from.addEventListener("change", applyRange); to.addEventListener("change", applyRange);
+      return h("th", { class: "f-time" }, sel, custom);
+    }
+    const inp = h("input", { type: "search", value: cur, "aria-label": "Filter " + c.label,
+      placeholder: c.filter === "num" ? "200, 5xx, >=400" : "Filter…",
+      title: c.filter === "num" ? "A number, 5xx, >=400, <100 or 200-299" : "Contains (case-insensitive); start with = for an exact match" });
+    inp.addEventListener("input", () => setFilter(c.key, inp.value.trim()));
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") setFilter(c.key, inp.value.trim(), true); });
+    return h("th", {}, inp);
+  };
+  const hasFilters = o.cols.some((c) => c.filter);
+  const tbody = h("tbody", {});
+  const tableEl = h("table", { class: "issues" }, h("thead", {}, headRow, hasFilters ? h("tr", { class: "filters" }, o.cols.map(filterCell)) : null), tbody);
+  const pager = h("div", { class: "pager" });
+  const chips = h("div", { class: "chips" });
+  const exportBtn = h("button", { class: "btn sm", title: "Download every row matching the current search, filters and sort (not just this page)" }, icon("download"), "Export CSV");
+  exportBtn.addEventListener("click", async () => {
+    exportBtn.disabled = true;
+    try {
+      if (o.fetch) {
+        const q = o.exportParams ? o.exportParams() : new URLSearchParams();
+        const srt = st.sort.map((x) => x.k + ":" + x.d).join(",");
+        if (srt) q.set("sort", srt);
+        for (const [k, v] of Object.entries(st.filters)) if (v) q.set("f." + k, v);
+        q.set("format", "csv"); q.set("tz", TZ);
+        await download(o.exportPath + "?" + q, (o.exportName || "export") + ".csv");
+      } else {
+        const cols = o.cols.filter((c) => c.key && c.label);
+        const rows = clientRows();
+        const lines = [cols.map((c) => csvCell(c.label)).join(",")].concat(rows.map((r) => cols.map((c) => {
+          const v = c.csv ? c.csv(r) : cellValue(c, r);
+          return csvCell(c.time ? isoLocal(v) : v);
+        }).join(",")));
+        saveBlob(new Blob(["\ufeff" + lines.join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" }), `fluid-${o.exportName || "export"}-${stamp()}.csv`);
+      }
+      toast("Exported " + data.total.toLocaleString() + " row" + (data.total === 1 ? "" : "s"));
+    } catch (e) { toast(e.message, true); }
+    finally { exportBtn.disabled = false; }
+  });
+  const el = h("div", { class: "data-table" }, h("div", { class: "dt-bar" }, chips, exportBtn), h("div", { class: "table-wrap" }, tableEl), pager);
+
+  const clientPage = () => {
+    const rows = clientRows();
+    return { items: rows.slice((st.page - 1) * st.size, st.page * st.size), total: rows.length };
+  };
+  function clientRows() {
+    let rows = o.rows.slice();
+    for (const [k, f] of Object.entries(st.filters)) {
+      const c = o.cols.find((x) => x.key === k); if (!c) continue;
+      rows = rows.filter((r) => {
+        const v = cellValue(c, r);
+        if (c.filter === "time") return matchTime(v, f);
+        if (c.filter === "num") return matchNum(v, f);
+        if (f.startsWith("=")) return String(v) === f.slice(1);
+        return String(Array.isArray(v) ? v.join(" ") : v).toLowerCase().includes(f.toLowerCase());
+      });
+    }
+    if (st.sort.length) {
+      const cs = st.sort.map((x) => [o.cols.find((c) => c.key === x.k), x.d === "desc" ? -1 : 1]).filter(([c]) => c);
+      rows.sort((a, b) => { for (const [c, dir] of cs) { const r = cmp(cellValue(c, a), cellValue(c, b)); if (r) return r * dir; } return 0; });
+    }
+    return rows;
+  }
+
+  const load = async () => {
+    save();
+    const my = ++seq;
+    try {
+      data = o.fetch
+        ? await o.fetch({ offset: (st.page - 1) * st.size, limit: st.size, sort: st.sort.map((x) => x.k + ":" + x.d).join(","), filters: st.filters })
+        : clientPage();
+    } catch (e) { if (my === seq) { fill(tbody, h("tr", {}, h("td", { colspan: String(o.cols.length) }, banner("danger", "Could not load", e.message)))); } return; }
+    if (my !== seq) return;
+    const pages = Math.max(1, Math.ceil(data.total / st.size));
+    if (st.page > pages && data.total > 0) { st.page = pages; return load(); }
+    draw();
+  };
+
+  const draw = () => {
+    for (const [k, { th, ind }] of thFor) {
+      const i = st.sort.findIndex((x) => x.k === k);
+      th.classList.toggle("sorted", i >= 0);
+      th.setAttribute("aria-sort", i < 0 ? "none" : st.sort[i].d === "asc" ? "ascending" : "descending");
+      fill(ind, i < 0 ? "↕" : [st.sort[i].d === "asc" ? "▲" : "▼", st.sort.length > 1 ? h("sup", {}, String(i + 1)) : null]);
+    }
+    const active = Object.entries(st.filters).filter(([, v]) => v);
+    fill(chips, active.length || st.sort.length ? [
+      active.map(([k, v]) => {
+        const c = o.cols.find((x) => x.key === k);
+        return h("span", { class: "chip" }, h("strong", {}, (c ? c.label : k) + ": "), chipText(c, v),
+          h("button", { class: "chip-x", "aria-label": "Remove filter", onclick: () => { delete st.filters[k]; st.page = 1; resetFilterInputs(); load(); } }, "×"));
+      }),
+      st.sort.length ? h("span", { class: "chip muted" }, "Sorted by ", st.sort.map((x, i) => {
+        const c = o.cols.find((y) => y.key === x.k);
+        return (i ? ", " : "") + (c ? c.label : x.k) + (x.d === "asc" ? " ↑" : " ↓");
+      })) : null,
+      h("button", { class: "btn subtle sm", onclick: () => { st.filters = {}; st.sort = (o.defaultSort || []).map((x) => { const [k, d] = x.split(":"); return { k, d }; }); st.page = 1; resetFilterInputs(); load(); } }, "Clear all"),
+    ] : null);
+    fill(tbody, data.items.length ? data.items.map((r) => tableRow(o.cols, r, o.onRow))
+      : h("tr", {}, h("td", { colspan: String(o.cols.length), class: "empty-cell" },
+        emptyState(active.length ? "Nothing matches these filters" : (o.empty || ["Nothing here yet", ""])[0],
+          active.length ? "Change or clear the column filters." : (o.empty || ["", ""])[1]))));
+    drawPager();
+    o.onDraw && o.onDraw(data);
+  };
+  const chipText = (c, v) => {
+    if (c && c.filter === "time") {
+      const p = TIME_PRESETS.find(([x]) => x === v); if (p) return p[1];
+      const [a, b] = v.split("..");
+      return (a ? fmtDT(a) : "…") + " → " + (b ? fmtDT(b) : "now");
+    }
+    if (c && Array.isArray(c.filter)) { const f = c.filter.find(([x]) => "=" + x === v); if (f) return f[1]; }
+    return v;
+  };
+  const resetFilterInputs = () => {
+    const row = tableEl.querySelector("tr.filters");
+    if (row) row.replaceWith(h("tr", { class: "filters" }, o.cols.map(filterCell)));
+  };
+
+  const drawPager = () => {
+    const total = data.total, pages = Math.max(1, Math.ceil(total / st.size));
+    const from = total ? (st.page - 1) * st.size + 1 : 0, to = Math.min(total, st.page * st.size);
+    const go = (p) => { p = Math.min(pages, Math.max(1, p)); if (p !== st.page) { st.page = p; load(); } };
+    const btn = (label, p, disabled, cls, aria) => h("button", { class: "btn sm " + (cls || ""), disabled: disabled ? true : undefined,
+      "aria-label": aria || label, "aria-current": cls === "on" ? "page" : undefined, onclick: () => go(p) }, label);
+    const nums = [];
+    const win = new Set([1, pages, st.page - 2, st.page - 1, st.page, st.page + 1, st.page + 2].filter((p) => p >= 1 && p <= pages));
+    let prev = 0;
+    for (const p of [...win].sort((a, b) => a - b)) {
+      if (p - prev > 1) nums.push(h("span", { class: "gap" }, "…"));
+      nums.push(btn(String(p), p, false, p === st.page ? "on" : "", "Page " + p));
+      prev = p;
+    }
+    const jump = h("input", { type: "number", min: "1", max: String(pages), value: String(st.page), class: "jump", "aria-label": "Go to page" });
+    jump.addEventListener("keydown", (e) => { if (e.key === "Enter") go(parseInt(jump.value, 10) || 1); });
+    fill(pager,
+      h("div", { class: "pager-info" }, total ? `Showing ${from.toLocaleString()}–${to.toLocaleString()} of ${total.toLocaleString()}` : "No results",
+        h("span", { class: "muted" }, " · times in " + TZ)),
+      h("div", { class: "pager-ctl" },
+        h("label", { class: "muted" }, "Rows ", select(PAGE_SIZES.map((n) => [String(n), String(n)]), String(st.size),
+          (v) => { st.size = +v; st.page = 1; load(); }, "Rows per page")),
+        btn("«", 1, st.page <= 1, "", "First page"), btn("‹", st.page - 1, st.page <= 1, "", "Previous page"),
+        nums,
+        btn("›", st.page + 1, st.page >= pages, "", "Next page"), btn("»", pages, st.page >= pages, "", "Last page"),
+        h("label", { class: "muted" }, "Go to ", jump, " / " + pages)));
+  };
+
+  load();
+  return {
+    el,
+    reload: load,
+    setRows(rows) { o.rows = rows; load(); },
+    get page() { return st.page; },
+    get filtered() { return Object.values(st.filters).some(Boolean); },
+    get sorted() { return st.sort.map((x) => x.k + ":" + x.d).join(",") !== (o.defaultSort || []).join(","); },
+    query() { // the table's filters as API params (e.g. for a summary of the same rows)
+      const q = new URLSearchParams();
+      for (const [k, v] of Object.entries(st.filters)) if (v) q.set("f." + k, v);
+      return q;
+    },
+  };
+}
+
+// serverList pages an /api list endpoint; extra() adds the page's own params.
+function serverList(path, extra) {
+  return async ({ offset, limit, sort, filters }) => {
+    const q = extra ? extra() : new URLSearchParams();
+    q.set("offset", String(offset)); q.set("limit", String(limit));
+    if (sort) q.set("sort", sort);
+    for (const [k, v] of Object.entries(filters)) if (v) q.set("f." + k, v);
+    return api("GET", path + "?" + q);
+  };
+}
+
 // ---------------------------------------------------------------- table
 
 function table(cols, rows, onRow) {
@@ -495,58 +844,91 @@ async function pageOverview() {
 
 // ---------------------------------------------------------------- events
 
-async function pageEvents() {
-  const defaults = { q: "", source: "", status: "", route: "", since: "" };
-  const f = queryState(defaults);
-  let items = [], next = "";
-  const listEl = h("div", {});
-  const load = async (more) => {
-    pushQuery(f, defaults);
-    const qs = new URLSearchParams({ limit: "50" });
-    for (const k of ["q", "source", "status", "route", "since"]) if (f[k]) qs.set(k, f[k]);
-    if (more) qs.set("before_id", next);
-    const r = await api("GET", "/api/events?" + qs);
-    items = more ? items.concat(r.items) : r.items;
-    next = r.next_before_id;
-    draw();
-    if (!more && items.length === 1 && f.q === items[0].id) showEvent(items[0].id);
+// payloadView shows a captured exchange: RQH, RQB, RSH, RSB.
+function payloadView(p, masked, l) {
+  if (!p) return null;
+  const headerText = (hs) => Object.keys(hs || {}).sort((a, b) => (a[0] === ":") === (b[0] === ":") ? a.localeCompare(b) : a[0] === ":" ? -1 : 1)
+    .map((k) => hs[k].map((v) => k + ": " + v).join("\n")).join("\n");
+  const bodyText = (part) => part.body ? pretty(part.body) : part.body_base64 ? "(binary, base64)\n" + part.body_base64 : "";
+  const sizeNote = (part) => {
+    if (!part.size) return "empty";
+    return bytes(part.size) + (part.truncated ? ` — first ${bytes(part.stored)} stored (capture_max_body_bytes)` : "");
   };
-  const cols = [
-    { label: "Key", render: (e) => h("span", { class: "key" }, eventKey(e)) },
-    { label: "Source", render: (e) => lozenge(e.source, e.source === "ingest" ? "purple" : "info") },
-    { label: "Route", render: (e) => h("span", { class: "cell-flex" }, avatar(e.route, true), h("span", {}, e.route)) },
-    { label: "Request", render: (e) => h("span", {}, h("strong", {}, e.method + " "), e.path) },
-    { label: "Vendor / type", render: (e) => e.vendor || e.event_type ? [e.vendor || "", e.event_type ? " · " + e.event_type : ""] : h("span", { class: "muted" }, "—") },
-    { label: "Status", render: (e) => statusLozenge(e.status) },
-    { label: "Size", num: true, render: (e) => bytes(e.body_size) },
-    { label: "From", render: (e) => h("span", { class: "mono" }, e.source_ip || "—") },
-    { label: "Received", render: (e) => when(e.ts) },
-  ];
-  const draw = () => fill(listEl, 
-    table(cols, items, (e) => showEvent(e.id)) || emptyState("No events", "Calls to /hooks/<id> and ingest paths appear here."),
-    next ? h("div", { class: "more" }, h("button", { class: "btn", onclick: () => load(true) }, "Load more")) : null);
+  const block = (code, title, text, note) => {
+    const pre = h("pre", { class: "code payload" }, text || "(none)");
+    return h("section", { class: "payload-part" },
+      h("div", { class: "payload-head" }, h("span", { class: "pl-code" }, code), h("strong", {}, title),
+        note ? h("span", { class: "muted" }, note) : null, h("span", { class: "spacer" }),
+        text ? h("button", { class: "btn sm subtle", onclick: () => navigator.clipboard?.writeText(text).then(() => toast("Copied " + code)) }, "Copy") : null),
+      pre);
+  };
+  const out = [h("h3", {}, l.direction === "inbound" ? "Request received and response sent" : "Request sent and response received")];
+  if (masked) out.push(banner("info", "Credentials are masked for viewer tokens", "Authorization, cookies, tokens and other known secrets show as ********. Editors see the exact values.", true));
+  if (l.attrs && l.attrs.encrypted) out.push(banner("info", "HTTPS tunnel", "The traffic inside a CONNECT tunnel is encrypted end to end; only the CONNECT request and its answer are recorded.", true));
+  if (p.request) {
+    out.push(block("RQH", "Request headers", headerText(p.request.headers)));
+    out.push(block("RQB", "Request body", bodyText(p.request), sizeNote(p.request)));
+  }
+  if (p.response) {
+    out.push(block("RSH", "Response headers", headerText(p.response.headers)));
+    out.push(block("RSB", "Response body", bodyText(p.response), sizeNote(p.response)));
+  } else if (p.request) {
+    out.push(h("p", { class: "muted" }, "No response was received (see the error above)."));
+  }
+  return out;
+}
 
+// legacyFilters turns old-style links (?route=x&status=y) into column filters.
+function legacyFilters(map) {
+  const q = new URLSearchParams(location.search);
+  const out = {};
+  for (const [k, fn] of Object.entries(map)) {
+    const v = q.get(k);
+    if (v) { const [col, val] = fn(v); out[col] = val; q.delete(k); }
+  }
+  if (Object.keys(out).length) { const qs = q.toString(); history.replaceState(null, "", location.pathname + (qs ? "?" + qs : "")); }
+  return out;
+}
+const exact = (col) => (v) => [col, "=" + v];
+
+async function pageEvents() {
+  const initialFilters = legacyFilters({ route: exact("route"), source: exact("source"), status: exact("status"), since: (v) => ["ts", v + ".."] });
+  const defaults = { q: "" };
+  const f = queryState(defaults);
   const routes = await routeOptions();
+  const cols = [
+    { key: "id", label: "Key", sort: true, filter: "text", render: (e) => h("span", { class: "key", title: e.id }, eventKey(e)) },
+    { key: "ts", label: "Received", time: true, sort: true, filter: "time", render: (e) => when(e.ts) },
+    { key: "source", label: "Source", sort: true, filter: [["webhook", "Webhook"], ["ingest", "Ingest"]], render: (e) => lozenge(e.source, e.source === "ingest" ? "purple" : "info") },
+    { key: "route", label: "Route", sort: true, filter: routes.map((r) => [r, r]), render: (e) => h("span", { class: "cell-flex" }, avatar(e.route, true), h("span", {}, e.route)) },
+    { key: "method", label: "Method", sort: true, filter: "text", render: (e) => h("strong", {}, e.method) },
+    { key: "path", label: "Path", sort: true, filter: "text", render: (e) => h("span", { class: "mono", title: e.path }, e.path) },
+    { key: "vendor", label: "Vendor", sort: true, filter: "text", render: (e) => e.vendor || h("span", { class: "muted" }, "—") },
+    { key: "event_type", label: "Event type", sort: true, filter: "text", render: (e) => e.event_type || h("span", { class: "muted" }, "—") },
+    { key: "status", label: "Status", sort: true, filter: [["pending", "Pending"], ["delivered", "Delivered"], ["partial", "Partial"], ["failed", "Failed"]], render: (e) => statusLozenge(e.status) },
+    { key: "body_size", label: "Size", num: true, sort: true, filter: "num", render: (e) => bytes(e.body_size) },
+    { key: "source_ip", label: "From", sort: true, filter: "text", render: (e) => h("span", { class: "mono" }, e.source_ip || "—") },
+  ];
+  const t = dataTable({
+    cols, initialFilters, defaultSort: ["ts:desc"], pageSize: 25,
+    fetch: serverList("/api/events", () => { const q = new URLSearchParams(); if (f.q) q.set("q", f.q); return q; }),
+    exportPath: "/api/events", exportName: "events", exportParams: () => { const q = new URLSearchParams(); if (f.q) q.set("q", f.q); return q; },
+    onRow: (e) => showEvent(e.id),
+    empty: ["No events", "Calls to /hooks/<id> and ingest paths appear here."],
+    onDraw: (d) => { if (f.q && d.items.length === 1 && d.items[0].id === f.q) showEvent(f.q); },
+  });
   page("Events", {
-    desc: "Every inbound call (webhook or ingest), stored before it is acknowledged. Open one to see its body, headers and deliveries.",
-    actions: h("button", { class: "btn", onclick: () => load() }, icon("refresh"), "Refresh"),
+    desc: "Every inbound call (webhook or ingest), stored before it is acknowledged. Filter any column, sort by several (Shift+click), open one to see its body, headers and deliveries.",
+    actions: h("button", { class: "btn", onclick: () => t.reload() }, icon("refresh"), "Refresh"),
   },
     h("div", { class: "toolbar" },
       h("input", { type: "search", placeholder: "Search path, vendor, type…", value: f.q, "aria-label": "Search",
-        onchange: (e) => { f.q = e.target.value; load(); } }),
-      seg([["", "All"], ["webhook", "Webhooks"], ["ingest", "Ingest"]], f.source, (v) => { f.source = v; pushQuery(f, defaults); route(); }),
-      select([["", "Any status"], ["pending", "Pending"], ["delivered", "Delivered"], ["partial", "Partial"], ["failed", "Failed"]], f.status,
-        (v) => { f.status = v; load(); }, "Status"),
-      select([["", "Any route"], ...routes.map((r) => [r, r])], f.route, (v) => { f.route = v; load(); }, "Route"),
-      select(SINCE, f.since, (v) => { f.since = v; load(); }, "Time range")),
-    listEl);
-  await load();
+        onchange: (e) => { f.q = e.target.value; pushQuery(f, defaults); t.reload(); } })),
+    t.el);
   return {
-    onLive(topic, ev) {
-      if (topic !== "events") return;
-      if ((f.source && ev.source !== f.source) || (f.route && ev.route !== f.route) || f.q || f.status) return;
-      items.unshift(ev);
-      draw();
+    onLive(topic) {
+      if (topic !== "events" || t.page !== 1) return; // live: refresh the first page (with its filters)
+      clearTimeout(this.timer); this.timer = setTimeout(() => t.reload(), 800);
     },
   };
 }
@@ -596,78 +978,74 @@ function retryButton(d, after) {
 // ---------------------------------------------------------------- deliveries
 
 async function pageDeliveries() {
-  const defaults = { view: "list", status: "", route: "" };
+  const initialFilters = legacyFilters({ route: exact("route"), status: exact("status") });
+  const defaults = { view: "list" };
   const f = queryState(defaults);
-  let items = [], next = 0;
-  const body = h("div", {});
-  const load = async (more) => {
-    pushQuery(f, defaults);
-    const qs = new URLSearchParams({ limit: f.view === "board" ? "300" : "50" });
-    if (f.route) qs.set("route", f.route);
-    if (f.status && f.view === "list") qs.set("status", f.status);
-    if (more) qs.set("before_id", String(next));
-    const r = await api("GET", "/api/deliveries?" + qs);
-    items = more ? items.concat(r.items) : r.items;
-    next = r.next_before_id;
-    draw();
-  };
-  const open = (d) => showEvent(d.event_id);
-  const cols = [
-    { label: "Key", render: (d) => h("span", { class: "key" }, "DL-" + d.id) },
-    { label: "Status", render: (d) => statusLozenge(d.status) },
-    { label: "Route", render: (d) => h("span", { class: "cell-flex" }, avatar(d.route, true), h("span", {}, d.route)) },
-    { label: "Target", render: (d) => h("span", { class: "mono", title: d.target }, d.target) },
-    { label: "Mode", render: (d) => lozenge(d.mode, d.mode === "sync" ? "" : "purple") },
-    { label: "Attempts", num: true, render: (d) => `${d.attempts}/${d.max_attempts}` },
-    { label: "Last", render: (d) => httpLozenge(d.last_status) },
-    { label: "Updated", render: (d) => when(d.updated_at) },
-    { label: "", render: (d) => retryButton(d, () => load()) },
-  ];
-  const COLS = [["pending", "Pending"], ["inflight", "In flight"], ["delivered", "Delivered"], ["failed", "Failed (sync)"], ["dead", "Dead letter"]];
-  const draw = () => {
-    if (f.view === "board") {
-      fill(body, h("div", { class: "board" }, COLS.map(([s, title]) => {
-        const col = items.filter((d) => d.status === s);
-        return h("section", { class: "column", "aria-label": title }, h("h3", {}, title, h("span", { class: "badge" }, String(col.length))),
-          col.slice(0, 60).map((d) => {
-            const c = h("div", { class: "bcard", tabindex: "0" },
-              h("div", { class: "t", title: d.target }, d.target.replace(/^https?:\/\//, "")),
-              h("div", { class: "m" }, avatar(d.route, true), h("span", {}, d.route), d.last_status ? httpLozenge(d.last_status) : null,
-                h("span", { class: "key" }, "DL-" + d.id)),
-              d.last_error && s !== "delivered" ? h("div", { class: "muted" }, d.last_error) : null);
-            c.addEventListener("click", () => open(d));
-            c.addEventListener("keydown", (e) => { if (e.key === "Enter") open(d); });
-            return c;
-          }));
-      })));
-    } else {
-      fill(body, table(cols, items, open) || emptyState("No deliveries", "Deliveries are created for every event target."),
-        next ? h("div", { class: "more" }, h("button", { class: "btn", onclick: () => load(true) }, "Load more")) : null);
-    }
-  };
   const routes = await routeOptions();
+  const STATUSES = [["pending", "Pending"], ["inflight", "In flight"], ["delivered", "Delivered"], ["failed", "Failed (sync)"], ["dead", "Dead letter"]];
+  const open = (d) => showEvent(d.event_id);
+  let t = null;
+  const reload = () => (t ? t.reload() : drawBoard());
+  const cols = [
+    { key: "id", label: "Key", num: true, sort: true, filter: "num", render: (d) => h("span", { class: "key" }, "DL-" + d.id) },
+    { key: "status", label: "Status", sort: true, filter: STATUSES, render: (d) => statusLozenge(d.status) },
+    { key: "route", label: "Route", sort: true, filter: routes.map((r) => [r, r]), render: (d) => h("span", { class: "cell-flex" }, avatar(d.route, true), h("span", {}, d.route)) },
+    { key: "target", label: "Target", sort: true, filter: "text", render: (d) => h("span", { class: "mono", title: d.target }, d.target) },
+    { key: "mode", label: "Mode", sort: true, filter: [["sync", "sync"], ["async", "async"]], render: (d) => lozenge(d.mode, d.mode === "sync" ? "" : "purple") },
+    { key: "attempts", label: "Attempts", num: true, sort: true, filter: "num", render: (d) => `${d.attempts}/${d.max_attempts}` },
+    { key: "last_status", label: "Last HTTP", num: true, sort: true, filter: "num", render: (d) => httpLozenge(d.last_status) },
+    { key: "last_error", label: "Last error", sort: true, filter: "text", render: (d) => d.last_error ? h("span", { class: "muted", title: d.last_error }, d.last_error) : "" },
+    { key: "created_at", label: "Created", time: true, sort: true, filter: "time", render: (d) => when(d.created_at) },
+    { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (d) => when(d.updated_at) },
+    { key: "next_at", label: "Next attempt", time: true, sort: true, filter: "time", render: (d) => d.status === "pending" ? when(d.next_at) : h("span", { class: "muted" }, "—") },
+    { key: "", label: "", render: (d) => retryButton(d, reload) },
+  ];
+  const body = h("div", {});
+  const drawBoard = async () => {
+    const q = new URLSearchParams(location.search);
+    const r = await api("GET", "/api/deliveries?limit=500" + (q.get("f.route") ? "&f.route=" + encodeURIComponent(q.get("f.route")) : ""));
+    fill(body, h("div", { class: "board" }, STATUSES.map(([s, title]) => {
+      const col = r.items.filter((d) => d.status === s);
+      return h("section", { class: "column", "aria-label": title }, h("h3", {}, title, h("span", { class: "badge" }, String(col.length))),
+        col.slice(0, 60).map((d) => {
+          const c = h("div", { class: "bcard", tabindex: "0" },
+            h("div", { class: "t", title: d.target }, d.target.replace(/^https?:\/\//, "")),
+            h("div", { class: "m" }, avatar(d.route, true), h("span", {}, d.route), d.last_status ? httpLozenge(d.last_status) : null,
+              h("span", { class: "key" }, "DL-" + d.id)),
+            h("div", { class: "muted small" }, when(d.updated_at)),
+            d.last_error && s !== "delivered" ? h("div", { class: "muted" }, d.last_error) : null);
+          c.addEventListener("click", () => open(d));
+          c.addEventListener("keydown", (e) => { if (e.key === "Enter") open(d); });
+          return c;
+        }));
+    })));
+  };
+  if (f.view === "board") { await drawBoard(); }
+  else {
+    t = dataTable({ cols, initialFilters, defaultSort: ["created_at:desc"], pageSize: 25, fetch: serverList("/api/deliveries"), onRow: open, exportPath: "/api/deliveries", exportName: "deliveries",
+      empty: ["No deliveries", "Deliveries are created for every event target."] });
+    fill(body, t.el);
+  }
+  const routeFilter = () => { const v = new URLSearchParams(location.search).get("f.route") || ""; return v.startsWith("=") ? v.slice(1) : ""; };
   page("Deliveries", {
-    desc: "Each event is sent to its targets with retries and exponential backoff; deliveries that give up land in the dead-letter column.",
+    desc: "Each event is sent to its targets with retries and exponential backoff; deliveries that give up become dead letters.",
     actions: [
       isEditor() ? h("button", { class: "btn", onclick: async () => {
-        try { const r = await api("POST", "/api/deliveries/retry-dead" + (f.route ? "?route=" + encodeURIComponent(f.route) : "")); toast(r.queued + " deliveries queued"); load(); }
+        const rf = routeFilter();
+        try { const r = await api("POST", "/api/deliveries/retry-dead" + (rf ? "?route=" + encodeURIComponent(rf) : "")); toast(r.queued + " deliveries queued"); reload(); }
         catch (e) { toast(e.message, true); }
       } }, icon("retry"), "Retry all dead") : null,
-      h("button", { class: "btn", onclick: () => load() }, icon("refresh"), "Refresh"),
+      h("button", { class: "btn", onclick: reload }, icon("refresh"), "Refresh"),
     ],
   },
     h("div", { class: "toolbar" },
-      seg([["list", "List"], ["board", "Board"]], f.view, (v) => { f.view = v; pushQuery(f, defaults); route(); }),
-      f.view === "list" ? select([["", "Any status"], ...COLS], f.status, (v) => { f.status = v; load(); }, "Status") : null,
-      select([["", "Any route"], ...routes.map((r) => [r, r])], f.route, (v) => { f.route = v; load(); }, "Route")),
+      seg([["list", "List"], ["board", "Board"]], f.view, (v) => { f.view = v; pushQuery(f, defaults); route(); })),
     body);
-  await load();
   return {
-    onLive(topic, d) {
-      if (topic !== "deliveries" || (f.route && d.route !== f.route)) return;
-      const i = items.findIndex((x) => x.id === d.id);
-      if (i >= 0) items[i] = d; else items.unshift(d);
-      draw();
+    onLive(topic) {
+      if (topic !== "deliveries") return;
+      if (t && t.page !== 1) return;
+      clearTimeout(this.timer); this.timer = setTimeout(reload, 800);
     },
   };
 }
@@ -677,107 +1055,132 @@ async function pageDeliveries() {
 const KINDS = ["proxy_http", "proxy_connect", "proxy_denied", "forward", "webhook", "ingest", "delivery", "auth", "admin", "config", "system", "app"];
 
 async function pageLogs() {
-  const defaults = { view: "list", direction: "", kind: "", level: "", status: "", since: "1h", q: "", route: "", client: "", host: "", by: "kind" };
+  const initialFilters = legacyFilters({ kind: exact("kind"), route: exact("route"), client: exact("client"), host: exact("host"),
+    source_ip: exact("source_ip"), status: (v) => ["status", v === "error" ? ">=400" : v], since: (v) => ["ts", v + ".."] });
+  if (!Object.keys(initialFilters).length && !location.search.includes("f.ts")) initialFilters.ts = "1h..";
+  const defaults = { view: "list", direction: "", level: "", q: "", by: "kind" };
   const f = queryState(defaults);
-  let items = [], next = 0;
-  const body = h("div", {});
-  const qs = () => {
-    const q = new URLSearchParams();
-    for (const k of ["direction", "kind", "level", "status", "since", "q", "route", "client", "host"]) if (f[k]) q.set(k, f[k]);
-    return q;
-  };
-  const load = async (more) => {
-    pushQuery(f, defaults);
-    if (f.view === "summary") {
-      const q = qs();
-      q.set("by", f.by);
-      const r = await api("GET", "/api/logs/summary?" + q);
-      drawSummary(r.items);
-      return;
-    }
-    const q = qs();
-    q.set("limit", "100");
-    if (more) q.set("before_id", String(next));
-    const r = await api("GET", "/api/logs?" + q);
-    items = more ? items.concat(r.items) : r.items;
-    next = r.next_before_id;
-    draw();
-  };
   const cols = [
-    { label: "Time", render: (l) => h("span", { class: "mono", title: new Date(l.ts).toLocaleString() }, new Date(l.ts).toLocaleTimeString()) },
-    { label: "Level", render: (l) => lozenge(l.level, STATUS_KIND[l.level]) },
-    { label: "Dir", render: (l) => dirTag(l.direction) },
-    { label: "Kind", render: (l) => h("span", { class: "mono" }, l.kind) },
-    { label: "Client / route", render: (l) => (l.client || l.route) ? h("span", { class: "cell-flex" }, avatar(l.client || l.route, true), h("span", {}, l.client || l.route)) : h("span", { class: "muted" }, "—") },
-    { label: "Method", render: (l) => l.method || "" },
-    { label: "Status", render: (l) => httpLozenge(l.status) },
-    { label: "ms", num: true, render: (l) => l.duration_ms ? String(l.duration_ms) : "" },
-    { label: "URL / message", render: (l) => h("span", { title: l.url || l.msg }, l.url || l.msg) },
+    { key: "ts", label: "Time", time: true, sort: true, filter: "time", render: (l) => when(l.ts) },
+    { key: "level", label: "Level", sort: true, filter: [["debug", "debug"], ["info", "info"], ["warn", "warn"], ["error", "error"]], render: (l) => lozenge(l.level, STATUS_KIND[l.level]) },
+    { key: "direction", label: "Dir", sort: true, filter: [["inbound", "IN"], ["outbound", "OUT"]], render: (l) => dirTag(l.direction) },
+    { key: "kind", label: "Kind", sort: true, filter: KINDS.map((k) => [k, k]), render: (l) => h("span", { class: "mono" }, l.kind) },
+    { key: "route", label: "Route", sort: true, filter: "text", render: (l) => l.route || h("span", { class: "muted" }, "—") },
+    { key: "client", label: "Client", sort: true, filter: "text", render: (l) => l.client ? h("span", { class: "cell-flex" }, avatar(l.client, true), h("span", {}, l.client)) : h("span", { class: "muted" }, "—") },
+    { key: "method", label: "Method", sort: true, filter: "text", render: (l) => l.method || "" },
+    { key: "status", label: "Status", num: true, sort: true, filter: "num", render: (l) => httpLozenge(l.status) },
+    { key: "duration_ms", label: "ms", num: true, sort: true, filter: "num", render: (l) => l.duration_ms ? String(l.duration_ms) : "" },
+    { key: "source_ip", label: "Source IP", sort: true, filter: "text", render: (l) => h("span", { class: "mono" }, l.source_ip || "") },
+    { key: "host", label: "Host", sort: true, filter: "text", render: (l) => l.host || "" },
+    { key: "msg", label: "URL / message", sort: true, filter: "text", render: (l) => h("span", { class: "cell-flex", title: l.url || l.msg },
+      l.has_payload ? h("span", { class: "pl-flag", title: "Full request and response captured" }, "RQ/RS") : null, h("span", {}, l.url || l.msg)) },
   ];
-  const showLog = (l) => openDetail("#" + l.id, l.msg,
-    h("div", { class: "toolbar" }, lozenge(l.level, STATUS_KIND[l.level]), dirTag(l.direction), h("span", { class: "mono" }, l.kind)),
-    props([["Time", new Date(l.ts).toLocaleString()], ["Client", l.client || null], ["Route", l.route || null], ["Method", l.method || null],
+  const showLog = async (l) => {
+    const meta = props([["Time", fmtDT(l.ts)], ["Client", l.client || null], ["Route", l.route || null], ["Method", l.method || null],
       ["Host", l.host || null], ["URL", l.url ? h("span", { class: "mono" }, l.url) : null], ["Status", l.status ? httpLozenge(l.status) : null],
       ["Duration", l.duration_ms ? l.duration_ms + " ms" : null], ["Bytes in / out", (l.bytes_in || l.bytes_out) ? bytes(l.bytes_in) + " / " + bytes(l.bytes_out) : null],
-      ["Source IP", l.source_ip || null], ["Trace", l.trace_id ? h("span", { class: "mono" }, l.trace_id) : null]]),
-    l.attrs && l.attrs.event_id ? h("p", {}, link("/events?q=" + encodeURIComponent(l.attrs.event_id), "Open event " + l.attrs.event_id)) : null,
-    l.attrs ? [h("h3", {}, "Attributes"), h("pre", { class: "code" }, JSON.stringify(l.attrs, null, 2))] : null);
-  const draw = () => fill(body, 
-    table(cols, items, showLog) || emptyState("No log entries", "Try a wider time range or fewer filters."),
-    next ? h("div", { class: "more" }, h("button", { class: "btn", onclick: () => load(true) }, "Load more")) : null);
-  const drawSummary = (rows) => {
-    const max = rows.length ? rows[0].count : 1;
-    fill(body, rows.length ? h("div", { class: "table-wrap" }, h("table", { class: "issues" },
-      h("thead", {}, h("tr", {}, ["", "Count", "Errors", "Avg ms", "Bytes out", "Last seen"].map((c, i) => h("th", { class: i ? "num" : "" }, c || f.by)))),
-      h("tbody", {}, rows.map((r) => {
-        const fill = h("i", {});
-        fill.style.width = Math.max(2, (r.count / max) * 100) + "%";
-        const tr = h("tr", {},
-          h("td", {}, h("div", {}, r.key || "—"), h("div", { class: "bar" }, fill)),
-          h("td", { class: "num" }, String(r.count)), h("td", { class: "num" }, r.errors ? lozenge(String(r.errors), "danger") : "0"),
-          h("td", { class: "num" }, r.avg_ms.toFixed(0)), h("td", { class: "num" }, bytes(r.bytes_out)), h("td", { class: "num" }, when(r.last_seen)));
-        tr.addEventListener("click", () => { if (["kind", "direction", "level", "status", "route", "client", "host"].includes(f.by)) { f[f.by] = r.key; f.view = "list"; pushQuery(f, defaults); route(); } });
-        return tr;
-      })))) : emptyState("Nothing to summarize", "No log entries match these filters."));
+      ["Source IP", l.source_ip || null], ["Trace", l.trace_id ? h("span", { class: "mono" }, l.trace_id) : null]]);
+    const payloadEl = h("div", {}, l.has_payload ? h("div", { class: "muted" }, "Loading request and response…") : null);
+    openDetail("#" + l.id, l.msg,
+      h("div", { class: "toolbar" }, lozenge(l.level, STATUS_KIND[l.level]), dirTag(l.direction), h("span", { class: "mono" }, l.kind)),
+      meta,
+      l.attrs && l.attrs.event_id ? h("p", {}, link("/events?q=" + encodeURIComponent(l.attrs.event_id), "Open event " + l.attrs.event_id)) : null,
+      payloadEl,
+      l.attrs ? [h("h3", {}, "Attributes"), h("pre", { class: "code" }, JSON.stringify(l.attrs, null, 2))] : null);
+    if (!l.has_payload) return;
+    try {
+      const d = await api("GET", "/api/logs/" + l.id);
+      fill(payloadEl, payloadView(d.payload, d.masked, l));
+    } catch (e) { fill(payloadEl, banner("danger", "Could not load the captured request", e.message)); }
   };
-  const text = (k, ph) => h("input", { type: "search", placeholder: ph, value: f[k], "aria-label": ph, onchange: (e) => { f[k] = e.target.value; load(); } });
-
+  const pageParams = () => {
+    const q = new URLSearchParams();
+    for (const k of ["direction", "level", "q"]) if (f[k]) q.set(k, f[k]);
+    return q;
+  };
+  const body = h("div", {});
+  let t = null;
+  const drawSummary = async () => {
+    const q = pageParams();
+    for (const [k, v] of new URLSearchParams(location.search)) if (k.startsWith("f.")) q.set(k, v);
+    for (const [k, v] of Object.entries(initialFilters)) if (!q.has("f." + k)) q.set("f." + k, v);
+    q.set("by", f.by);
+    const r = await api("GET", "/api/logs/summary?" + q);
+    const rows = r.items, max = rows.length ? rows[0].count : 1;
+    const st = dataTable({
+      rows, pageSize: 25, defaultSort: ["count:desc"], exportName: "logs-summary-by-" + f.by,
+      cols: [
+        { key: "key", label: f.by, sort: true, filter: "text", render: (x) => h("div", {}, h("div", {}, x.key || "—"),
+          (() => { const b = h("i", {}); b.style.width = Math.max(2, (x.count / max) * 100) + "%"; return h("div", { class: "bar" }, b); })()) },
+        { key: "count", label: "Count", num: true, sort: true, filter: "num", render: (x) => String(x.count) },
+        { key: "errors", label: "Errors", num: true, sort: true, filter: "num", render: (x) => x.errors ? lozenge(String(x.errors), "danger") : "0" },
+        { key: "avg_ms", label: "Avg ms", num: true, sort: true, filter: "num", render: (x) => x.avg_ms.toFixed(0) },
+        { key: "bytes_out", label: "Bytes out", num: true, sort: true, filter: "num", render: (x) => bytes(x.bytes_out) },
+        { key: "last_seen", label: "Last seen", time: true, sort: true, filter: "time", render: (x) => when(x.last_seen) },
+      ],
+      onRow: (x) => {
+        const col = cols.find((c) => c.key === f.by);
+        if (!col || !col.filter) return;
+        const q = new URLSearchParams(location.search);
+        q.set("f." + f.by, col.filter === "num" ? String(x.key) : "=" + x.key); q.delete("view"); q.delete("by");
+        history.replaceState(null, "", location.pathname + "?" + q); route();
+      },
+      empty: ["Nothing to summarize", "No log entries match these filters."],
+    });
+    fill(body, banner("info", "Summary of the rows matching the list's filters", "Switch to List to change filters; click a row to list its entries.", true), st.el);
+  };
+  if (f.view === "summary") await drawSummary();
+  else {
+    t = dataTable({ cols, initialFilters, defaultSort: ["ts:desc"], pageSize: 50, fetch: serverList("/api/logs", pageParams), onRow: showLog, exportPath: "/api/logs", exportName: "logs", exportParams: pageParams,
+      empty: ["No log entries", "Try a wider time range or fewer filters."] });
+    fill(body, t.el);
+  }
+  const reload = () => (t ? t.reload() : drawSummary());
+  const setPage = (k, v) => { f[k] = v; pushQuery(f, defaults); reload(); };
   page("Logs", {
-    desc: "Every proxy call, forward, webhook, ingest and delivery, stored in SQLite. Incoming calls are marked IN, outgoing calls OUT.",
-    actions: h("button", { class: "btn", onclick: () => load() }, icon("refresh"), "Refresh"),
+    desc: "Every proxy call, forward, webhook, ingest and delivery, stored in SQLite. Incoming calls are marked IN, outgoing calls OUT. Filter any column; Shift+click headers to sort by several.",
+    actions: h("button", { class: "btn", onclick: reload }, icon("refresh"), "Refresh"),
   },
     h("div", { class: "toolbar" },
       seg([["list", "List"], ["summary", "Summary"]], f.view, (v) => { f.view = v; pushQuery(f, defaults); route(); }),
-      seg([["", "All"], ["inbound", "↓ Incoming"], ["outbound", "↑ Outgoing"]], f.direction, (v) => { f.direction = v; pushQuery(f, defaults); route(); }),
-      select([["", "Any kind"], ...KINDS.map((k) => [k, k])], f.kind, (v) => { f.kind = v; load(); }, "Kind"),
-      select([["", "Any level"], ["info", "Info+"], ["warn", "Warn+"], ["error", "Error"]], f.level, (v) => { f.level = v; load(); }, "Level"),
-      select([["", "Any status"], ["2xx", "2xx"], ["3xx", "3xx"], ["4xx", "4xx"], ["5xx", "5xx"], ["error", "≥ 400"]], f.status, (v) => { f.status = v; load(); }, "Status"),
-      select(SINCE, f.since, (v) => { f.since = v; load(); }, "Time range"),
+      seg([["", "All"], ["inbound", "↓ Incoming"], ["outbound", "↑ Outgoing"]], f.direction, (v) => setPage("direction", v)),
+      select([["", "Any level"], ["info", "Info+"], ["warn", "Warn+"], ["error", "Error"]], f.level, (v) => setPage("level", v), "Minimum level"),
+      h("input", { type: "search", placeholder: "Search message, URL, attributes…", value: f.q, "aria-label": "Search", onchange: (e) => setPage("q", e.target.value) }),
       f.view === "summary" ? select([["kind", "Group by kind"], ["direction", "Group by direction"], ["route", "Group by route"],
         ["client", "Group by client"], ["host", "Group by host"], ["status", "Group by status"], ["source_ip", "Group by source IP"],
-        ["level", "Group by level"], ["method", "Group by method"]], f.by, (v) => { f.by = v; load(); }, "Group by") : null),
-    h("div", { class: "toolbar" }, text("q", "Search text…"), text("route", "Route"), text("client", "Client"), text("host", "Host")),
+        ["level", "Group by level"], ["method", "Group by method"]], f.by, (v) => setPage("by", v), "Group by") : null),
     body);
-  await load();
   return {
-    onLive(topic, l) {
-      if (topic !== "logs" || f.view !== "list") return;
-      if ((f.direction && l.direction !== f.direction) || (f.kind && l.kind !== f.kind) || f.q || f.status ||
-        (f.route && l.route !== f.route) || (f.client && l.client !== f.client) || (f.host && l.host !== f.host)) return;
-      if (f.level && ["debug", "info", "warn", "error"].indexOf(l.level) < ["debug", "info", "warn", "error"].indexOf(f.level)) return;
-      items.unshift(l);
-      if (items.length > 500) items.length = 500;
-      draw();
+    onLive(topic) {
+      if (topic !== "logs" || !t || t.page !== 1) return;
+      clearTimeout(this.timer); this.timer = setTimeout(reload, 1000);
     },
   };
 }
 
 // ---------------------------------------------------------------- config resources (webhooks, ingest, profiles)
 
+// Who may call a webhook / ingest rule: allowed_ips + source_cidrs, or the restricted default.
+function senderList(o) { return [...(o.allowed_ips || []), ...(o.source_cidrs || [])]; }
+function sendersCell(o) {
+  const l = senderList(o);
+  if (!l.length) return lozenge("private only", "warn");
+  if (l.includes("*")) return lozenge("anyone", o.auth ? "" : "danger");
+  return h("span", { class: "mono", title: l.join("\n") }, l.length > 2 ? l.slice(0, 2).join(", ") + " +" + (l.length - 2) : l.join(", "));
+}
+function sendersView(o) {
+  const l = senderList(o);
+  if (!l.length) return h("span", {}, lozenge("private only", "warn"), " loopback and private networks (restricted default)");
+  return h("div", { class: "rule-list" }, l.map((r) => h("code", { class: "rule" }, r)));
+}
+const IP_HELP = "One per line: * (anyone), an IP, a CIDR (52.66.0.0/16) or an IPv4 wildcard (52.66.*.*, 52.66.*, 52.66.1-5.*).";
 const ROUTE_FIELDS = [
+  { legend: "Who can call it", fields: [
+    { k: "allowed_ips", label: "Allowed IPs", type: "list", help: IP_HELP + " Empty: loopback and private networks only (restricted default), so internet senders get 403." },
+    { k: "source_cidrs", label: "Source CIDRs (same as allowed IPs)", type: "list", help: "Kept for existing files; combined with Allowed IPs." },
+  ] },
   { legend: "Inbound checks", fields: [
     { k: "methods", label: "Allowed methods", type: "list", help: "One per line. Default POST; * allows any." },
-    { k: "source_cidrs", label: "Allowed sender IPs / CIDRs", type: "list", help: "One per line. Empty allows any sender." },
     { k: "rate_limit.requests_per_minute", label: "Rate limit (requests / minute / IP)", type: "number", help: "Empty uses the global limit; 0 disables." },
     { k: "rate_limit.burst", label: "Rate limit burst", type: "number" },
   ] },
@@ -819,18 +1222,21 @@ const RES = {
       { k: "disabled", label: "Disabled (answer 404)", type: "bool" },
     ] }, ...ROUTE_FIELDS],
     cols: [
-      { label: "ID", render: (w) => h("span", { class: "cell-flex" }, avatar(w.id, true), h("span", { class: "key" }, w.id)) },
-      { label: "Status", render: (w) => w.disabled ? lozenge("disabled") : lozenge("active", "success") },
-      { label: "Mode", render: (w) => lozenge(w.async ? "async" : "sync", w.async ? "purple" : "") },
-      { label: "Target", render: (w) => h("span", { class: "mono", title: w.target }, w.target) },
-      { label: "Mirrors", num: true, render: (w) => String((w.mirrors || []).length) },
-      { label: "Auth", render: (w) => authSummary(w) },
-      { label: "Updated", render: (w) => when(w.updated_at) },
+      { key: "id", label: "ID", sort: true, filter: "text", render: (w) => h("span", { class: "cell-flex" }, avatar(w.id, true), h("span", { class: "key" }, w.id)) },
+      { key: "status", label: "Status", v: (w) => w.disabled ? "disabled" : "active", sort: true, filter: [["active", "active"], ["disabled", "disabled"]], render: (w) => w.disabled ? lozenge("disabled") : lozenge("active", "success") },
+      { key: "mode", label: "Mode", v: (w) => w.async ? "async" : "sync", sort: true, filter: [["sync", "sync"], ["async", "async"]], render: (w) => lozenge(w.async ? "async" : "sync", w.async ? "purple" : "") },
+      { key: "target", label: "Target", sort: true, filter: "text", render: (w) => h("span", { class: "mono", title: w.target }, w.target) },
+      { key: "mirrors", label: "Mirrors", num: true, v: (w) => (w.mirrors || []).length, sort: true, filter: "num", render: (w) => String((w.mirrors || []).length) },
+      { key: "allowed_ips", label: "Allowed IPs", v: sendersText, sort: true, filter: "text", render: (w) => sendersCell(w) },
+      { key: "auth", label: "Auth", v: authText, sort: true, filter: "text", render: (w) => authSummary(w) },
+      { key: "description", label: "Description", sort: true, filter: "text", render: (w) => w.description || "" },
+      { key: "created_at", label: "Created", time: true, sort: true, filter: "time", render: (w) => when(w.created_at) },
+      { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (w) => when(w.updated_at) },
     ],
     detail: (w) => [
       props([["Public path", h("span", { class: "mono" }, "/hooks/" + w.id)], ["Target", h("span", { class: "mono" }, w.target)],
         ["Mirrors", (w.mirrors || []).join("\n") || null], ["Mode", w.async ? "async (202, durable)" : "sync (passthrough)"],
-        ["Methods", (w.methods || []).join(", ")], ["Senders", (w.source_cidrs || []).join(", ") || "any"],
+        ["Methods", (w.methods || []).join(", ")], ["Allowed IPs", sendersView(w)],
         ["Inbound auth", authSummary(w)], ["Target auth", w.target_auth ? w.target_auth.type : "none"],
         ["Retries", String(w.max_retries)], ["Timeout", w.timeout_sec + " s"], ["Description", w.description || null]]),
     ],
@@ -856,17 +1262,21 @@ const RES = {
       { k: "response.body", label: "Body", type: "textarea" },
     ] }, ...ROUTE_FIELDS],
     cols: [
-      { label: "ID", render: (r) => h("span", { class: "cell-flex" }, avatar(r.id, true), h("span", { class: "key" }, r.id)) },
-      { label: "Status", render: (r) => r.disabled ? lozenge("disabled") : lozenge("active", "success") },
-      { label: "Priority", num: true, render: (r) => String(r.priority || 0) },
-      { label: "Match", render: (r) => h("span", {}, lozenge(r.match.type), " ", h("span", { class: "mono" }, r.match.value)) },
-      { label: "Vendor / type", render: (r) => [r.vendor || "", r.event_type ? " · " + r.event_type : ""] },
-      { label: "Targets", num: true, render: (r) => String(r.targets.length) },
-      { label: "Auth", render: (r) => authSummary(r) },
+      { key: "id", label: "ID", sort: true, filter: "text", render: (r) => h("span", { class: "cell-flex" }, avatar(r.id, true), h("span", { class: "key" }, r.id)) },
+      { key: "status", label: "Status", v: (r) => r.disabled ? "disabled" : "active", sort: true, filter: [["active", "active"], ["disabled", "disabled"]], render: (r) => r.disabled ? lozenge("disabled") : lozenge("active", "success") },
+      { key: "priority", label: "Priority", num: true, v: (r) => r.priority || 0, sort: true, filter: "num", render: (r) => String(r.priority || 0) },
+      { key: "match", label: "Match", v: (r) => r.match.type + " " + r.match.value, sort: true, filter: "text", render: (r) => h("span", {}, lozenge(r.match.type), " ", h("span", { class: "mono" }, r.match.value)) },
+      { key: "vendor", label: "Vendor", sort: true, filter: "text", render: (r) => r.vendor || "" },
+      { key: "event_type", label: "Event type", sort: true, filter: "text", render: (r) => r.event_type || "" },
+      { key: "targets", label: "Targets", num: true, v: (r) => r.targets.length, csv: (r) => r.targets.join(" "), sort: true, filter: "num", render: (r) => String(r.targets.length) },
+      { key: "allowed_ips", label: "Allowed IPs", v: sendersText, sort: true, filter: "text", render: (r) => sendersCell(r) },
+      { key: "auth", label: "Auth", v: authText, sort: true, filter: "text", render: (r) => authSummary(r) },
+      { key: "created_at", label: "Created", time: true, sort: true, filter: "time", render: (r) => when(r.created_at) },
+      { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (r) => when(r.updated_at) },
     ],
     detail: (r) => [props([["Match", r.match.type + " " + r.match.value], ["Priority", String(r.priority || 0)], ["Vendor", r.vendor || null],
       ["Event type", r.event_type || null], ["Targets", r.targets.join("\n")], ["Ack", `${r.response.status} ${r.response.content_type}`],
-      ["Ack body", h("span", { class: "mono" }, r.response.body)], ["Senders", (r.source_cidrs || []).join(", ") || "any"],
+      ["Ack body", h("span", { class: "mono" }, r.response.body)], ["Allowed IPs", sendersView(r)],
       ["Inbound auth", authSummary(r)], ["Retries", String(r.max_retries)]])],
     related: (r) => "/events?route=" + encodeURIComponent(r.id),
   },
@@ -884,11 +1294,13 @@ const RES = {
       { k: "timeout_sec", label: "Timeout (seconds)", type: "number" },
     ] }],
     cols: [
-      { label: "Name", render: (p) => h("span", { class: "cell-flex" }, avatar(p.name, true), h("span", { class: "key" }, p.name)) },
-      { label: "Base URL", render: (p) => h("span", { class: "mono" }, p.base_url) },
-      { label: "Injected headers", render: (p) => Object.keys(p.headers || {}).join(", ") || h("span", { class: "muted" }, "none") },
-      { label: "Clients", render: (p) => (p.clients || []).join(", ") || "all" },
-      { label: "Methods", render: (p) => (p.allowed_methods || []).join(", ") || "any" },
+      { key: "name", label: "Name", sort: true, filter: "text", render: (p) => h("span", { class: "cell-flex" }, avatar(p.name, true), h("span", { class: "key" }, p.name)) },
+      { key: "base_url", label: "Base URL", sort: true, filter: "text", render: (p) => h("span", { class: "mono" }, p.base_url) },
+      { key: "headers", label: "Injected headers", v: (p) => Object.keys(p.headers || {}).join(", "), sort: true, filter: "text", render: (p) => Object.keys(p.headers || {}).join(", ") || h("span", { class: "muted" }, "none") },
+      { key: "clients", label: "Clients", v: (p) => (p.clients || []).join(", ") || "all", sort: true, filter: "text", render: (p) => (p.clients || []).join(", ") || "all" },
+      { key: "allowed_methods", label: "Methods", v: (p) => (p.allowed_methods || []).join(", ") || "any", sort: true, filter: "text", render: (p) => (p.allowed_methods || []).join(", ") || "any" },
+      { key: "created_at", label: "Created", time: true, sort: true, filter: "time", render: (p) => when(p.created_at) },
+      { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (p) => when(p.updated_at) },
     ],
     detail: (p) => [props([["Base URL", h("span", { class: "mono" }, p.base_url)], ["Headers", Object.keys(p.headers || {}).join(", ") || "none"],
       ["Clients", (p.clients || []).join(", ") || "all"], ["Methods", (p.allowed_methods || []).join(", ") || "any"],
@@ -898,6 +1310,8 @@ const RES = {
   },
 };
 
+function authText(o) { const a = o.auth || {}; return [a.token && "token", a.basic && "basic", a.hmac && "hmac"].filter(Boolean).join(", ") || "none"; }
+function sendersText(o) { const l = senderList(o); return l.length ? l.join(", ") : "private only (default)"; }
 function authSummary(o) {
   const a = o.auth || {};
   const parts = [a.token && "token", a.basic && "basic", a.hmac && "hmac"].filter(Boolean);
@@ -910,9 +1324,11 @@ async function pageResources(res) {
     desc: res.desc,
     actions: isEditor() ? h("button", { class: "btn primary", onclick: () => editResource(res, null) }, icon("plus"), "Create " + res.singular) : null,
   }, viewerNote(),
-    table(res.cols, items, (it) => showResource(res, it)) ||
-      emptyState("No " + res.title.toLowerCase() + " yet", "They are stored as JSON files in the dynamic directory.",
-        isEditor() ? h("button", { class: "btn primary", onclick: () => editResource(res, null) }, "Create " + res.singular) : null));
+    dataTable({ cols: res.cols, rows: items, onRow: (it) => showResource(res, it), defaultSort: [res.idKey + ":asc"], exportName: res.path.slice(1),
+      empty: ["No " + res.title.toLowerCase() + " yet", "They are stored as JSON files in the dynamic directory."] }).el);
+  const want = new URLSearchParams(location.search).get("id"); // e.g. from the Access page
+  const it = want && items.find((x) => x[res.idKey] === want);
+  if (it) setTimeout(() => showResource(res, it), 0);
   return { el: p };
 }
 
@@ -1077,9 +1493,11 @@ function closeModal() { document.querySelector(".overlay")?.remove(); }
 async function pageProxy() {
   const p = await api("GET", "/api/proxy");
   const clientCols = [
-    { label: "Client", render: (c) => h("span", { class: "cell-flex" }, avatar(c.name, true), h("span", {}, c.name)) },
-    { label: "Status", render: (c) => c.disabled ? lozenge("disabled") : lozenge("active", "success") },
-    { label: "Token", render: (c) => h("span", { class: "mono" }, c.token) },
+    { key: "name", label: "Client", sort: true, filter: "text", render: (c) => h("span", { class: "cell-flex" }, avatar(c.name, true), h("span", {}, c.name)) },
+    { key: "status", label: "Status", v: (c) => c.disabled ? "disabled" : "active", sort: true, filter: [["active", "active"], ["disabled", "disabled"]], render: (c) => c.disabled ? lozenge("disabled") : lozenge("active", "success") },
+    { key: "token", label: "Token", render: (c) => h("span", { class: "mono" }, c.token) },
+    { key: "created_at", label: "Created", time: true, sort: true, filter: "time", render: (c) => when(c.created_at) },
+    { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (c) => when(c.updated_at) },
     { label: "", render: (c) => isEditor() ? h("span", { class: "cell-flex" },
       h("button", { class: "btn sm", onclick: (e) => { e.stopPropagation(); rotate(c.name); } }, "Rotate"),
       h("button", { class: "btn sm", onclick: async (e) => { e.stopPropagation(); await clientCall("PATCH", c.name, { disabled: !c.disabled }); } }, c.disabled ? "Enable" : "Disable"),
@@ -1140,7 +1558,95 @@ async function pageProxy() {
       h("div", { class: "panel" }, h("h2", {}, "How to connect"),
         h("pre", { class: "code" }, "export HTTPS_PROXY=http://any:<TOKEN>@<agent>:8080\n\n# or the JSON relay\ncurl -X POST http://<agent>:8080/forward \\\n  -H 'X-Agent-Key: <TOKEN>' \\\n  -d '{\"method\":\"GET\",\"url\":\"https://api.example.com/x\"}'"))),
     h("h2", {}, "Clients"),
-    table(clientCols, p.clients) || emptyState("No clients", "Create one to let applications use the proxy."));
+    dataTable({ id: "clients", cols: clientCols, rows: p.clients, defaultSort: ["name:asc"], exportName: "proxy-clients",
+      empty: ["No clients", "Create one to let applications use the proxy."] }).el);
+  return { el };
+}
+
+// ---------------------------------------------------------------- access
+
+async function pageAccess() {
+  const a = await api("GET", "/api/access");
+  const isDefault = (l) => l.length === a.default.length && l.every((x, i) => x === a.default[i]);
+  const status = (l) => {
+    if (!l.length) return lozenge("Nobody", "danger");
+    if (l.includes("*")) return lozenge("Everyone", "danger");
+    return isDefault(l) ? lozenge("Restricted default", "success") : lozenge("Restricted", "success");
+  };
+  const lists = [
+    { k: "proxy", title: "Forward proxy & /forward", what: "Applications that send outbound traffic through this agent." },
+    { k: "admin", title: "Console & API", what: "People and tools using this console, the API and /metrics." },
+  ];
+  const rules = (l) => h("div", { class: "rule-list" }, l.map((r) => h("code", { class: "rule" }, r)));
+  const panel = (l) => h("div", { class: "panel" },
+    h("div", { class: "panel-head" }, h("h2", {}, l.title), status(a[l.k])),
+    h("p", { class: "help" }, l.what),
+    a[l.k].length ? rules(a[l.k]) : h("p", { class: "muted" }, "Empty list: every client is refused."),
+    l.k === "admin" ? h("p", { class: "help" }, icon("lock"), " File-only: change it in access.json in the dynamic config directory, so nobody can lock the console or open it to the internet from here.") : null);
+
+  const routeCols = [
+    { key: "source", label: "Type", sort: true, filter: [["webhook", "webhook"], ["ingest", "ingest"]], render: (r) => lozenge(r.source) },
+    { key: "id", label: "Route", sort: true, filter: "text", render: (r) => h("span", { class: "key" }, r.id) },
+    { key: "allowed_ips", label: "Who can call it", v: (r) => r.default ? "private only (default)" : r.allowed_ips.join(", "), sort: true, filter: "text",
+      render: (r) => r.default ? h("span", {}, lozenge("private only", "warn"), " restricted default")
+        : r.allowed_ips.includes("*") ? lozenge("anyone", r.auth ? "" : "danger") : rules(r.allowed_ips) },
+    { key: "auth", label: "Auth", v: (r) => r.auth ? "required" : "none", sort: true, filter: [["required", "required"], ["none", "none"]], render: (r) => r.auth ? lozenge("required", "success") : lozenge("none") },
+    { key: "status", label: "Status", v: (r) => r.disabled ? "disabled" : "active", sort: true, filter: [["active", "active"], ["disabled", "disabled"]], render: (r) => r.disabled ? lozenge("disabled") : lozenge("active", "success") },
+    { key: "updated_at", label: "Updated", time: true, sort: true, filter: "time", render: (r) => when(r.updated_at) },
+  ];
+  const openRoute = (r) => navigate((r.source === "webhook" ? "/webhooks" : "/ingest") + "?id=" + encodeURIComponent(r.id));
+
+  const notes = a.notes.filter((n) => n.level !== "info");
+  const ipIn = h("input", { type: "text", placeholder: "e.g. 52.66.10.20", value: a.client_ip, "aria-label": "IP address to test" });
+  const out = h("div", { class: "tester-out" });
+  const verdict = (v, label) => h("div", { class: "tester-row" },
+    v.allowed ? lozenge("allowed", "success") : lozenge("refused", "danger"), h("span", {}, label),
+    v.rule ? h("span", { class: "muted" }, "matched ", h("code", {}, v.rule)) : null);
+  const test = async () => {
+    try {
+      const r = await api("POST", "/api/access/test", { ip: ipIn.value.trim() });
+      fill(out, lists.map((l) => verdict(r[l.k], l.title)),
+        r.routes.map((v) => verdict(v, (v.source === "webhook" ? "webhook " : "ingest rule ") + v.id)));
+    } catch (e) { fill(out, h("div", { class: "form-error" }, e.message)); }
+  };
+  ipIn.addEventListener("keydown", (e) => { if (e.key === "Enter") test(); });
+
+  const edit = () => {
+    const obj = { proxy: a.proxy };
+    const err = h("div", { class: "form-error hidden" });
+    modal("Edit proxy allowlist", [err,
+      fieldInput({ k: "proxy", label: "Forward proxy & /forward", type: "list", help: IP_HELP + " Empty refuses everyone." }, obj, false),
+      h("p", { class: "help" }, "The console & API list is file-only. Webhooks and ingest rules have their own Allowed IPs in their edit form.")],
+    [h("button", { class: "btn subtle", onclick: closeModal }, "Cancel"),
+      h("button", { class: "btn subtle", onclick: () => save({ proxy: [...a.default] }) }, "Reset to restricted default"),
+      h("button", { class: "btn primary", onclick: () => save(obj, err) }, "Save")]);
+  };
+  const save = async (obj, err) => {
+    try { await api("PUT", "/api/access", obj); closeModal(); toast("Saved"); route(); }
+    catch (e) { if (err) { err.textContent = e.message; err.classList.remove("hidden"); } else toast(e.message, true); }
+  };
+
+  const el = page("Access", {
+    desc: "Who may call each webhook and ingest rule (its Allowed IPs), and who may use the proxy and this console. Anything else gets 403 before authentication, and the refusal is logged.",
+    actions: isEditor() ? [h("button", { class: "btn primary", onclick: edit }, icon("edit"), "Edit proxy allowlist")] : null,
+  }, viewerNote(),
+    notes.map((n) => banner(n.level === "error" ? "danger" : "warn", n.level === "error" ? "Error" : "Warning", n.message, true)),
+    banner("info", "You are connecting from " + a.client_ip,
+      a.trusted_proxies.length ? "Addresses are taken from X-Forwarded-For when the request comes through a trusted proxy (" + a.trusted_proxies.join(", ") + ")."
+        : "No reverse proxy is trusted, so the connecting address is what is checked.", true),
+    h("h2", {}, "Webhooks & ingest rules"),
+    h("p", { class: "help" }, "Each route has its own Allowed IPs (allowed_ips, or source_cidrs, in its file). Without any, only loopback and private networks may call it."),
+    dataTable({ id: "routes", cols: routeCols, rows: a.routes, onRow: openRoute, pageSize: 10, defaultSort: ["source:desc", "id:asc"], exportName: "route-access",
+      empty: ["No webhooks or ingest rules", "Create one to set who can call it."] }).el,
+    h("div", { class: "grid-2 mt" }, lists.map(panel)),
+    h("div", { class: "grid-2 mt" },
+      h("div", { class: "panel" }, h("h2", {}, "Test an address"),
+        h("div", { class: "tester" }, ipIn, h("button", { class: "btn", onclick: test }, "Check")), out),
+      h("div", { class: "panel" }, h("h2", {}, "Rule syntax"),
+        props([["*", "anyone"], ["203.0.113.7", "one address (IPv4 or IPv6)"], ["10.0.0.0/8", "CIDR (IPv4 or IPv6)"],
+          ["52.66.*.*  or  52.66.*", "IPv4 wildcard octets"], ["192.168.1-5.*", "IPv4 octet range"],
+          ["(none)", "restricted default: " + a.default.join(", ")]]))));
+  test();
   return { el };
 }
 

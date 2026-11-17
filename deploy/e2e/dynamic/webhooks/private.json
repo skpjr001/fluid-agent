@@ -1,0 +1,1 @@
+{"$schema": "../../../../schema/webhook.schema.json", "target": "http://whoami/", "description": "no allowed_ips: restricted default"}

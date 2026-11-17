@@ -86,16 +86,17 @@ func (in *Inbound) serveIngest(w http.ResponseWriter, r *http.Request) {
 	}
 	src := ClientIP(r, in.app.cfg.trusted).String()
 	in.app.metrics.Inc("fluid_inbound_requests_total", "source", "ingest", "route", "", "result", "unmatched")
-	slog.Warn("no ingest rule matched", "kind", "ingest", "direction", "inbound", "source_ip", src,
-		"method", r.Method, "url", r.URL.Path, "status", 404)
 	http.NotFound(w, r)
+	slog.Warn("no ingest rule matched", "kind", "ingest", "direction", "inbound", "source_ip", src,
+		"method", r.Method, "url", r.URL.Path, "status", 404, "capture", captureFrom(r.Context()))
 }
 
 func (in *Inbound) reject(w http.ResponseWriter, rt inboundRoute, r *http.Request, src string, code int, result, why string, start time.Time) {
 	in.app.metrics.Inc("fluid_inbound_requests_total", "source", rt.source, "route", rt.id, "result", result)
-	slog.Warn(rt.source+" rejected", "kind", rt.source, "direction", "inbound", "route", rt.id, "source_ip", src,
-		"method", r.Method, "url", r.URL.Path, "status", code, "reason", why, "ms", time.Since(start).Milliseconds())
 	http.Error(w, strings.ToLower(http.StatusText(code)), code)
+	slog.Warn(rt.source+" rejected", "kind", rt.source, "direction", "inbound", "route", rt.id, "source_ip", src,
+		"method", r.Method, "url", r.URL.Path, "status", code, "reason", why, "ms", time.Since(start).Milliseconds(),
+		"capture", captureFrom(r.Context()))
 }
 
 func (in *Inbound) serveRoute(w http.ResponseWriter, r *http.Request, rt inboundRoute) {
@@ -107,7 +108,7 @@ func (in *Inbound) serveRoute(w http.ResponseWriter, r *http.Request, rt inbound
 		return
 	}
 	if !rt.opts.allowsIP(ip) {
-		in.reject(w, rt, r, src, http.StatusForbidden, "forbidden", "source IP not in source_cidrs", start)
+		in.reject(w, rt, r, src, http.StatusForbidden, "forbidden", "source IP not in allowed_ips", start)
 		return
 	}
 	lim := in.app.cfg.WebhookRateLimit
@@ -179,7 +180,8 @@ func (in *Inbound) serveRoute(w http.ResponseWriter, r *http.Request, rt inbound
 		in.app.metrics.Inc("fluid_inbound_requests_total", "source", rt.source, "route", rt.id, "result", result)
 		attrs := append([]any{"kind", rt.source, "direction", "inbound", "route", rt.id, "source_ip", src,
 			"method", r.Method, "host", r.Host, "url", r.URL.Path, "status", code, "bytes_in", len(body),
-			"ms", time.Since(start).Milliseconds(), "event_id", ev.ID, "vendor", rt.vendor, "event_type", rt.eventType}, extra...)
+			"ms", time.Since(start).Milliseconds(), "event_id", ev.ID, "vendor", rt.vendor, "event_type", rt.eventType,
+			"capture", captureFrom(r.Context())}, extra...)
 		slog.InfoContext(ctx, rt.source+" received", attrs...)
 		endSpan(span, code, nil)
 	}

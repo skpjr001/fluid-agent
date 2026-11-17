@@ -24,17 +24,22 @@ func noteCfg(t *testing.T, mutate func(*StaticConfig)) *StaticConfig {
 }
 
 func goodSnap() *snapshot {
-	return &snapshot{
+	s := &snapshot{
 		proxy: &ProxyConfig{Clients: []Client{{Name: "a", Token: "x"}}, AllowedHosts: []string{"api.example.com"}},
 		admin: &AdminConfig{Tokens: []AdminToken{{Name: "e", Token: "t", Role: RoleEditor}}},
 		webhooks: map[string]*Webhook{
-			"open":   {ID: "open"},
-			"signed": {ID: "signed", RouteOptions: RouteOptions{Auth: &InboundAuth{HMAC: &HMACAuth{}}}},
+			"open":   {ID: "open", RouteOptions: RouteOptions{AllowedIPs: []string{"*"}}},
+			"signed": {ID: "signed", RouteOptions: RouteOptions{AllowedIPs: []string{"*"}, Auth: &InboundAuth{HMAC: &HMACAuth{}}}},
 			"cidr":   {ID: "cidr", RouteOptions: RouteOptions{SourceCIDRs: []string{"1.2.3.4"}}},
 			"off":    {ID: "off", Disabled: true},
 		},
 		ingest: []*IngestRule{{ID: "nse"}},
 	}
+	for _, w := range s.webhooks {
+		w.RouteOptions.normalize(true)
+	}
+	s.ingest[0].RouteOptions.normalize(true)
+	return s
 }
 
 // has reports whether a note with this level contains every fragment.
@@ -72,8 +77,8 @@ func TestNotesPlainHostEverythingExposed(t *testing.T) {
 		{"info", "cannot sit behind an HTTP reverse proxy"},
 		{"warn", "webhooks are plain HTTP and no reverse proxy is trusted"},
 		{"warn", "console/API on 0.0.0.0:9000 is plain HTTP on all interfaces"},
-		{"warn", "webhook open accepts requests from anyone"},
-		{"warn", "ingest rule nse accepts requests from anyone"},
+		{"warn", "webhook open accepts requests from any address without auth"},
+		{"warn", "ingest rule nse accepts only loopback and private-network senders"},
 		{"info", "proxy listener: http://:8080 (all interfaces), path /"},
 		{"info", "admin listener: http://0.0.0.0:9000 (all interfaces)"},
 		{"info", "callback bodies are kept for 14 days"},

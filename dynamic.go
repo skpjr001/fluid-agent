@@ -36,6 +36,9 @@ type Client struct {
 	Name     string `json:"name"`
 	Token    string `json:"token"`
 	Disabled bool   `json:"disabled,omitempty"`
+
+	CreatedAt time.Time `json:"created_at,omitzero"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"` // last enable/disable or token rotation
 }
 
 func (p *ProxyConfig) normalize() error {
@@ -144,7 +147,8 @@ func (a *AdminConfig) normalize() error {
 // RouteOptions are shared by webhooks and ingest rules.
 type RouteOptions struct {
 	Methods     []string          `json:"methods,omitempty"`      // default ["POST"]; "*" = any
-	SourceCIDRs []string          `json:"source_cidrs,omitempty"` // allowed sender IPs
+	AllowedIPs  []string          `json:"allowed_ips,omitempty"`  // who may call this route; omitted = loopback + private networks, ["*"] = anyone
+	SourceCIDRs []string          `json:"source_cidrs,omitempty"` // same as allowed_ips; both lists are combined
 	Auth        *InboundAuth      `json:"auth,omitempty"`
 	RateLimit   *RateLimit        `json:"rate_limit,omitempty"`  // overrides the global per-IP limit
 	AddHeaders  map[string]string `json:"add_headers,omitempty"` // set on relayed requests
@@ -152,7 +156,7 @@ type RouteOptions struct {
 	MaxRetries  *int              `json:"max_retries,omitempty"` // default 0 (sync) or 8 (async)
 	TimeoutSec  int               `json:"timeout_sec,omitempty"` // per attempt, default 15
 
-	nets []netip.Prefix
+	ips IPList
 }
 
 // InboundAuth is optional; when set, every configured check must pass.
@@ -241,11 +245,15 @@ func (o *RouteOptions) normalize(async bool) error {
 			errs = append(errs, fmt.Errorf("methods[%d] %q is not a valid method", i, m))
 		}
 	}
-	nets, err := parsePrefixes(o.SourceCIDRs)
-	if err != nil {
-		errs = append(errs, fmt.Errorf("source_cidrs: %w", err))
+	allow := o.allowedIPs()
+	if len(allow) == 0 {
+		allow = defaultAllow // restricted unless the route says otherwise
 	}
-	o.nets = nets
+	ips, err := parseIPList(allow)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("allowed_ips%w", err))
+	}
+	o.ips = ips
 	if o.Auth != nil {
 		if o.Auth.Token == nil && o.Auth.HMAC == nil && o.Auth.Basic == nil {
 			errs = append(errs, errors.New("auth: set token, basic and/or hmac, or remove auth"))
@@ -314,8 +322,17 @@ func (o *RouteOptions) allowsMethod(m string) bool {
 	return slices.Contains(o.Methods, "*") || slices.Contains(o.Methods, m)
 }
 
+// allowedIPs is allowed_ips plus source_cidrs (both names are accepted).
+func (o *RouteOptions) allowedIPs() []string {
+	return append(append([]string(nil), o.AllowedIPs...), o.SourceCIDRs...)
+}
+
+// restrictedDefault reports whether the route relies on the default list.
+func (o *RouteOptions) restrictedDefault() bool { return len(o.AllowedIPs)+len(o.SourceCIDRs) == 0 }
+
 func (o *RouteOptions) allowsIP(a netip.Addr) bool {
-	return len(o.nets) == 0 || (a.IsValid() && prefixesContain(o.nets, a))
+	_, ok := o.ips.Match(a)
+	return ok
 }
 
 func (o *RouteOptions) retries() int { return *o.MaxRetries }

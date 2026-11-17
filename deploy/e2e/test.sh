@@ -55,6 +55,15 @@ for host in nginx traefik caddy; do
   check "$host passes the real sender" '"source_ip": "172.32.0.50"' "$got"
 done
 
+echo "== per-route allowed_ips (real sender 172.32.0.50 through each proxy)"
+for host in nginx traefik caddy; do
+  c() { $COMPOSE exec -T client curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Host: hooks.test' "http://$host/hooks/$1" -d x; }
+  check "$host: route without allowed_ips refuses a public sender" '403' "$(c private)"
+  check "$host: wildcard range 172.32.0.40-60 lets it in" '200' "$(c wild)"
+done
+check "private sender passes the restricted default" '200' "$($COMPOSE exec -T tester curl -s -o /dev/null -w '%{http_code}' -X POST http://agent:8081/hooks/private -d x)"
+check "refusal logged with the route and sender" '"route":"private"' "$($COMPOSE logs --no-log-prefix agent 2>/dev/null | grep 'not in allowed_ips' | grep '172.32.0.50')"
+
 echo "== built-in TLS, no reverse proxy (certificate files)"
 R=(--resolve tls.test:58080:127.0.0.1 --resolve tls.test:58081:127.0.0.1 --resolve tls.test:59000:127.0.0.1 --cacert .certs/ca.pem)
 for i in $(seq 1 30); do curl -fs "${R[@]}" https://tls.test:58081/livez >/dev/null && break; sleep 1; done
@@ -86,6 +95,12 @@ check "fresh: proxy.json created" 'created proxy config /app/dynamic/proxy.json'
 check "fresh: admin.json + token location logged" 'generated editor token named \"admin\"' "$flogs"
 check "fresh: sub-directories created" 'created dynamic config directory /app/dynamic/webhooks' "$flogs"
 check "fresh: token value never logged" 'not-logged' "$($COMPOSE logs agent-fresh 2>/dev/null | grep -qE '[0-9a-f]{64}' && echo leaked || echo not-logged)"
+check "fresh: access.json created" 'created access allowlists /app/dynamic/access.json' "$flogs"
+check "fresh: proxy refuses a public client by default" '403' "$($COMPOSE exec -T client curl -s -o /dev/null -w '%{http_code}' -X POST http://agent-fresh:8080/forward -d '{}')"
+check "fresh: proxy lets a private client reach auth" '401' "$($COMPOSE exec -T tester curl -s -o /dev/null -w '%{http_code}' -X POST http://agent-fresh:8080/forward -d '{}')"
+sleep 1
+check "fresh: denial logged with the sender" '"source_ip":"172.32.0.50"' "$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"kind":"access"')"
+check "fresh: restricted-default note" 'forward proxy and /forward accept only loopback and private networks' "$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"topic":"access"')"
 check "fresh: created files are valid" 'OK: all config files are valid' "$($F check -config /app/config.json 2>&1)"
 check "fresh: init on a second run creates nothing" 'nothing to create' "$($F init -config /app/config.json 2>&1)"
 nboot() { $COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep -c '"topic":"bootstrap"'; }
@@ -102,8 +117,9 @@ check "agent: container detected" 'running in a' "$(logs agent | grep -o 'runnin
 check "agent: image VOLUME counts as storage (no false warning)" 'no-volume-warning' "$(logs agent | grep -q 'not on a mounted volume' && echo warned || echo no-volume-warning)"
 check "agent: read-only config mount warned" '"level":"WARN","msg":"dynamic config dir /app/dynamic is read-only' "$(logs agent)"
 check "agent: reverse proxy trust explained" 'expecting TLS to be terminated by a reverse proxy at 172.31.0.0/24' "$(logs agent)"
+check "agent: restricted route warned" '"level":"WARN","msg":"webhook private accepts only loopback and private-network senders' "$(logs agent)"
 check "agent: console base path" 'console at /console/' "$(logs agent)"
-check "agent: open webhook warned" '"level":"WARN","msg":"webhook w accepts requests from anyone' "$(logs agent)"
+check "agent: open webhook warned" '"level":"WARN","msg":"webhook w accepts requests from any address without auth' "$(logs agent)"
 check "agent-tls: HTTPS without proxy" 'webhooks are served over HTTPS directly' "$(logs agent-tls)"
 check "agent-tls: certificate details" 'certificate /certs/tls.crt for tls.test, localhost, 127.0.0.1' "$(logs agent-tls)"
 check "agent-tls: HTTPS proxy note" 'HTTPS proxy: clients use https://' "$(logs agent-tls)"

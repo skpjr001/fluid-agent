@@ -144,6 +144,15 @@
         "store_event_bodies": {
           "type": "boolean",
           "description": "Keep bodies after delivery (shown in the UI)."
+        },
+        "capture_payloads": {
+          "type": "boolean",
+          "description": "Store the full request and response (headers and bodies) of every logged API call: inbound webhooks/ingest, deliveries, /forward and plain-HTTP proxy requests (HTTPS tunnels: the CONNECT exchange only). Stored raw; viewer tokens see credential values masked, editors see everything. Default true."
+        },
+        "capture_max_body_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum bytes stored per captured body (the full size is recorded either way). 0 stores headers only. Default 10485760 (10 MiB)."
         }
       },
       "description": "SQLite storage."

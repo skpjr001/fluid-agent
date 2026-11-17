@@ -29,6 +29,16 @@
           "disabled": {
             "type": "boolean",
             "description": "Reject this client."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Set by the agent when the client is created."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Set by the agent on enable/disable or token rotation."
           }
         },
         "required": [

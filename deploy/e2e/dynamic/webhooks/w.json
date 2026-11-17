@@ -1,1 +1,1 @@
-{"$schema": "../../../../schema/webhook.schema.json", "target": "http://whoami/"}
+{"$schema": "../../../../schema/webhook.schema.json", "target": "http://whoami/", "allowed_ips": ["*"]}

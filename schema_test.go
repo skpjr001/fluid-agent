@@ -125,6 +125,7 @@ func TestSchemasMatchStructs(t *testing.T) {
 		"config.schema.json":  StaticConfig{},
 		"proxy.schema.json":   ProxyConfig{},
 		"admin.schema.json":   AdminConfig{},
+		"access.schema.json":  AccessConfig{},
 		"webhook.schema.json": Webhook{},
 		"ingest.schema.json":  IngestRule{},
 		"profile.schema.json": Profile{},

@@ -13,11 +13,12 @@ fluid-agent runs as a plain binary (systemd), in a container, with or without a 
 
 * **Base paths** (`proxy_base_path`, `webhook_base_path`, `admin_base_path`) accept requests both with and without the prefix, so it does not matter whether the reverse proxy strips it. The console learns its external prefix from `admin_base_path`, or from `X-Forwarded-Prefix` sent by a peer in `trusted_proxies` (Traefik's StripPrefix sets it; for Caddy add `header_up X-Forwarded-Prefix /console`).
 * **The forward proxy** speaks HTTP proxy protocol (`CONNECT`, absolute URLs), which HTTP reverse proxies cannot route. Expose it directly (firewalled), give it `proxy_tls`, or pass it through as TCP (nginx `stream {}`, Traefik TCP router). Caddy's core has no TCP proxy.
+* **IP allowlists** are restricted by default to loopback and private networks: each webhook and ingest rule takes `allowed_ips` in its own file, and the proxy and console take theirs from `dynamic/access.json`. Internet senders get `403` until their addresses are listed (wildcards like `52.66.*.*` work). Behind a reverse proxy the real client address is checked only if the proxy is in `trusted_proxies`; in a container with published ports, rootless Podman or Docker's userland proxy can replace it with the gateway address, which the agent warns about.
 * **Behind any proxy** set `trusted_proxies` to the proxy's address so `source_cidrs`, rate limits and logs see the real sender. Configure the proxy to *overwrite* `X-Forwarded-For` (`$remote_addr`) where possible.
 
 ## First start creates what is missing
 
-Every layout below starts from an empty directory: the agent creates `config.json` (all defaults), `dynamic/` (`webhooks/`, `ingest/`, `profiles/`, deny-by-default `proxy.json`, `admin.json` with a generated editor token unless `PROXY_ADMIN_TOKEN` is set), the database directory and ACME caches, and logs each with `topic: "bootstrap"`. Existing files are never touched. `fluid-agent init` does it without serving (the systemd unit runs it as `ExecStartPre`).
+Every layout below starts from an empty directory: the agent creates `config.json` (all defaults), `dynamic/` (`webhooks/`, `ingest/`, `profiles/`, deny-by-default `proxy.json`, `access.json` restricting the proxy and console to loopback and private networks, `admin.json` with a generated editor token unless `PROXY_ADMIN_TOKEN` is set), the database directory and ACME caches, and logs each with `topic: "bootstrap"`. Existing files are never touched. `fluid-agent init` does it without serving (the systemd unit runs it as `ExecStartPre`).
 
 | Where | What you do | What is created |
 |---|---|---|
@@ -34,6 +35,7 @@ At startup the agent inspects how it is running and logs every caveat that appli
 
 | Situation | Examples of what is logged |
 |---|---|
+| Access | who may call each webhook / ingest rule: on the restricted default (warn), open to `*` without auth (warn); proxy and console lists: `*` (warn), empty or an unreachable loopback console (error); container NAT hiding client addresses (warn). New notes are logged when a route or `access.json` changes |
 | First start | each directory and file created (`topic: bootstrap`), or a warning when it could not be |
 | Host / systemd / container | where it runs; root on a host (warn); in a container: the host's IP is the egress IP, database or config not on a volume (warn), read-only config mount (warn) |
 | Each listener | `scheme://addr (all interfaces / loopback only), path /base`; privileged ports and `CAP_NET_BIND_SERVICE` |

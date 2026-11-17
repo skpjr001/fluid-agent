@@ -320,6 +320,7 @@ type attemptResult struct {
 	retryable bool
 	ms        int64
 	resp      *http.Response // only for sync deliveries; body buffered
+	capture   *Capture       // the request sent and the response received
 }
 
 func (o *Outbox) attempt(ctx context.Context, ev *Event, d Delivery, opts *RouteOptions, keepResp bool) attemptResult {
@@ -334,14 +335,18 @@ func (o *Outbox) attempt(ctx context.Context, ev *Event, d Delivery, opts *Route
 		endSpan(span, 0, err)
 		return attemptResult{err: err, ms: time.Since(start).Milliseconds()}
 	}
+	c := o.app.newCapture()
+	defer c.Finish()
+	c.SetRequest(requestHeaders(req.Method, req.URL.String(), req.URL.Host, req.Header), ev.raw)
 	resp, err := o.client.Do(req)
 	if err != nil {
 		endSpan(span, 0, err)
-		return attemptResult{err: err, retryable: true, ms: time.Since(start).Milliseconds()}
+		return attemptResult{err: err, retryable: true, ms: time.Since(start).Milliseconds(), capture: c}
 	}
 	rb, rerr := io.ReadAll(io.LimitReader(resp.Body, o.app.cfg.MaxBodyBytes))
 	resp.Body.Close()
-	res := attemptResult{status: resp.StatusCode, ms: time.Since(start).Milliseconds()}
+	c.SetResponse(responseHeaders(resp.StatusCode, resp.Header), rb)
+	res := attemptResult{status: resp.StatusCode, ms: time.Since(start).Milliseconds(), capture: c}
 	switch {
 	case rerr != nil:
 		res.err, res.retryable = rerr, true
@@ -430,7 +435,8 @@ func (o *Outbox) logAttempt(ev *Event, d Delivery, res attemptResult) {
 	o.app.metrics.Inc("fluid_deliveries_total", "mode", d.Mode, "result", result)
 	attrs := []any{"kind", "delivery", "direction", "outbound", "route", d.Route, "method", ev.Method,
 		"host", hostOf(d.Target), "url", d.Target, "status", res.status, "ms", res.ms, "bytes_in", len(ev.raw),
-		"event_id", ev.ID, "delivery_id", d.ID, "attempt", d.Attempts, "max_attempts", d.MaxAttempts, "mode", d.Mode}
+		"event_id", ev.ID, "delivery_id", d.ID, "attempt", d.Attempts, "max_attempts", d.MaxAttempts, "mode", d.Mode,
+		"capture", res.capture}
 	if res.err != nil {
 		attrs = append(attrs, "err", res.err.Error())
 	}
@@ -506,14 +512,11 @@ type DeliveryQuery struct {
 	EventID  string
 	BeforeID int64
 	Limit    int
+	List     ListParams // column filters, sort, offset
 }
 
-func (o *Outbox) ListDeliveries(ctx context.Context, q DeliveryQuery) ([]Delivery, int64, error) {
-	if q.Limit <= 0 || q.Limit > 500 {
-		q.Limit = 100
-	}
-	var conds []string
-	var args []any
+func (q DeliveryQuery) where() (string, []any) {
+	conds, args := append([]string(nil), q.List.Conds...), append([]any(nil), q.List.Args...)
 	if q.Route != "" {
 		conds, args = append(conds, "route = ?"), append(args, q.Route)
 	}
@@ -526,12 +529,31 @@ func (o *Outbox) ListDeliveries(ctx context.Context, q DeliveryQuery) ([]Deliver
 	if q.BeforeID > 0 {
 		conds, args = append(conds, "id < ?"), append(args, q.BeforeID)
 	}
-	where := ""
-	if len(conds) > 0 {
-		where = " WHERE " + strings.Join(conds, " AND ")
+	if len(conds) == 0 {
+		return "", args
 	}
-	rows, err := o.app.db.QueryContext(ctx, `SELECT `+deliveryCols+` FROM deliveries`+where+` ORDER BY id DESC LIMIT ?`,
-		append(args, q.Limit)...)
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// CountDeliveries is the total for the same filters (for paging).
+func (o *Outbox) CountDeliveries(ctx context.Context, q DeliveryQuery) (int64, error) {
+	where, args := q.where()
+	var n int64
+	err := o.app.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM deliveries`+where, args...).Scan(&n)
+	return n, err
+}
+
+func (o *Outbox) ListDeliveries(ctx context.Context, q DeliveryQuery) ([]Delivery, int64, error) {
+	if q.Limit <= 0 || q.Limit > maxPageSize {
+		q.Limit = 100
+	}
+	where, args := q.where()
+	order := q.List.Order
+	if order == "" {
+		order = "id DESC"
+	}
+	rows, err := o.app.db.QueryContext(ctx, `SELECT `+deliveryCols+` FROM deliveries`+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`,
+		append(args, q.Limit, q.List.Offset)...)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -559,6 +581,7 @@ type EventQuery struct {
 	Since    time.Time
 	BeforeID string
 	Limit    int
+	List     ListParams // column filters, sort, offset
 }
 
 const eventStatusSQL = `(SELECT CASE
@@ -568,12 +591,8 @@ const eventStatusSQL = `(SELECT CASE
 	WHEN SUM(status = 'delivered') = 0 THEN 'failed'
 	ELSE 'partial' END FROM deliveries d WHERE d.event_id = e.id)`
 
-func (o *Outbox) ListEvents(ctx context.Context, q EventQuery) ([]Event, string, error) {
-	if q.Limit <= 0 || q.Limit > 500 {
-		q.Limit = 100
-	}
-	var conds []string
-	var args []any
+func (q EventQuery) where() (string, []any) {
+	conds, args := append([]string(nil), q.List.Conds...), append([]any(nil), q.List.Args...)
 	if q.Route != "" {
 		conds, args = append(conds, "e.route = ?"), append(args, q.Route)
 	}
@@ -593,13 +612,32 @@ func (o *Outbox) ListEvents(ctx context.Context, q EventQuery) ([]Event, string,
 	if q.BeforeID != "" {
 		conds, args = append(conds, "e.id < ?"), append(args, q.BeforeID)
 	}
-	where := ""
-	if len(conds) > 0 {
-		where = " WHERE " + strings.Join(conds, " AND ")
+	if len(conds) == 0 {
+		return "", args
+	}
+	return " WHERE " + strings.Join(conds, " AND "), args
+}
+
+// CountEvents is the total for the same filters (for paging).
+func (o *Outbox) CountEvents(ctx context.Context, q EventQuery) (int64, error) {
+	where, args := q.where()
+	var n int64
+	err := o.app.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM events e`+where, args...).Scan(&n)
+	return n, err
+}
+
+func (o *Outbox) ListEvents(ctx context.Context, q EventQuery) ([]Event, string, error) {
+	if q.Limit <= 0 || q.Limit > maxPageSize {
+		q.Limit = 100
+	}
+	where, args := q.where()
+	order := q.List.Order
+	if order == "" {
+		order = "e.id DESC"
 	}
 	rows, err := o.app.db.QueryContext(ctx, `SELECT e.id, e.ts, e.source, e.route, e.vendor, e.event_type, e.method,
 		e.path, e.query, e.source_ip, e.body_size, e.traceparent, `+eventStatusSQL+` FROM events e`+where+
-		` ORDER BY e.id DESC LIMIT ?`, append(args, q.Limit)...)
+		` ORDER BY `+order+` LIMIT ? OFFSET ?`, append(args, q.Limit, q.List.Offset)...)
 	if err != nil {
 		return nil, "", err
 	}

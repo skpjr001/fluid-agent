@@ -36,6 +36,7 @@ type Store struct {
 type snapshot struct {
 	proxy    *ProxyConfig
 	admin    *AdminConfig
+	access   *AccessConfig
 	webhooks map[string]*Webhook
 	profiles map[string]*Profile
 	ingest   []*IngestRule // sorted: priority desc, id asc
@@ -53,7 +54,7 @@ func NewStore(dir string) (*Store, error) {
 	}
 	s := &Store{dir: dir}
 	s.snap.Store(&snapshot{
-		proxy: &ProxyConfig{AllowedPorts: []int{443}}, admin: &AdminConfig{},
+		proxy: &ProxyConfig{AllowedPorts: []int{443}}, admin: &AdminConfig{}, access: emptyAccess(),
 		webhooks: map[string]*Webhook{}, profiles: map[string]*Profile{}, errors: map[string]string{},
 	})
 	if err := s.Reload(true); err != nil {
@@ -63,6 +64,7 @@ func NewStore(dir string) (*Store, error) {
 }
 
 func (s *Store) Proxy() *ProxyConfig           { return s.snap.Load().proxy }
+func (s *Store) Access() *AccessConfig         { return s.snap.Load().access }
 func (s *Store) Admin() *AdminConfig           { return s.snap.Load().admin }
 func (s *Store) Webhook(id string) *Webhook    { return s.snap.Load().webhooks[id] }
 func (s *Store) Webhooks() map[string]*Webhook { return s.snap.Load().webhooks }
@@ -171,6 +173,26 @@ func loadDir(dir string, old *snapshot) *snapshot {
 			fail(p, err)
 		} else {
 			next.admin = &ac
+		}
+	}
+
+	// access.json
+	next.access = emptyAccess()
+	if old != nil {
+		next.access = old.access
+	}
+	p = filepath.Join(dir, "access.json")
+	var acc AccessConfig
+	switch err := readStrict(p, &acc); {
+	case os.IsNotExist(err):
+		next.access = emptyAccess()
+	case err != nil:
+		fail(p, err)
+	default:
+		if err := acc.normalize(); err != nil {
+			fail(p, err)
+		} else {
+			next.access = &acc
 		}
 	}
 
@@ -340,6 +362,16 @@ func (s *Store) SaveProxy(p *ProxyConfig) error {
 	}
 	p.Schema = SchemaBase + "proxy.schema.json"
 	return s.writeFile("proxy.json", p)
+}
+
+// SaveAccess writes access.json. The admin list is file-only: callers must
+// pass the current one through unchanged.
+func (s *Store) SaveAccess(a *AccessConfig) error {
+	if err := a.normalize(); err != nil {
+		return invalid(err)
+	}
+	a.Schema = SchemaBase + "access.schema.json"
+	return s.writeFile("access.json", a)
 }
 
 // Delete removes webhooks/<id>.json, profiles/<id>.json or ingest/<id>.json.

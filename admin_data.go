@@ -37,13 +37,28 @@ func (a *Admin) listEvents(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, err.Error())
 		return
 	}
-	evs, next, err := a.app.outbox.ListEvents(r.Context(), EventQuery{Route: q.Get("route"), Source: q.Get("source"),
-		Status: q.Get("status"), Text: q.Get("q"), Since: since, BeforeID: q.Get("before_id"), Limit: queryInt(r, "limit", 100)})
+	lp, err := eventListSpec.parse(q)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	eq := EventQuery{Route: q.Get("route"), Source: q.Get("source"), Status: q.Get("status"), Text: q.Get("q"),
+		Since: since, BeforeID: q.Get("before_id"), Limit: clampLimit(queryInt(r, "limit", 100), 100), List: lp}
+	if q.Get("format") == "csv" {
+		a.exportEvents(w, r, eq)
+		return
+	}
+	evs, next, err := a.app.outbox.ListEvents(r.Context(), eq)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": evs, "next_before_id": next})
+	total, err := a.app.outbox.CountEvents(r.Context(), eq)
+	if err != nil {
+		errJSON(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, pageJSON(evs, next, total, lp, eq.Limit))
 }
 
 func (a *Admin) getEvent(w http.ResponseWriter, r *http.Request) {
@@ -61,13 +76,28 @@ func (a *Admin) getEvent(w http.ResponseWriter, r *http.Request) {
 
 func (a *Admin) listDeliveries(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	ds, next, err := a.app.outbox.ListDeliveries(r.Context(), DeliveryQuery{Route: q.Get("route"), Status: q.Get("status"),
-		EventID: q.Get("event_id"), BeforeID: queryInt64(r, "before_id"), Limit: queryInt(r, "limit", 100)})
+	lp, err := deliveryListSpec.parse(q)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	dq := DeliveryQuery{Route: q.Get("route"), Status: q.Get("status"), EventID: q.Get("event_id"),
+		BeforeID: queryInt64(r, "before_id"), Limit: clampLimit(queryInt(r, "limit", 100), 100), List: lp}
+	if q.Get("format") == "csv" {
+		a.exportDeliveries(w, r, dq)
+		return
+	}
+	ds, next, err := a.app.outbox.ListDeliveries(r.Context(), dq)
 	if err != nil {
 		errJSON(w, 500, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": ds, "next_before_id": next})
+	total, err := a.app.outbox.CountDeliveries(r.Context(), dq)
+	if err != nil {
+		errJSON(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, pageJSON(ds, next, total, lp, dq.Limit))
 }
 
 func (a *Admin) retryDelivery(w http.ResponseWriter, r *http.Request) {
@@ -98,7 +128,11 @@ func logQueryFrom(r *http.Request) (LogQuery, error) {
 	q := r.URL.Query()
 	lq := LogQuery{Direction: q.Get("direction"), Level: q.Get("level"), Client: q.Get("client"), Route: q.Get("route"),
 		Host: q.Get("host"), SourceIP: q.Get("source_ip"), Status: q.Get("status"), Text: q.Get("q"),
-		BeforeID: queryInt64(r, "before_id"), Limit: queryInt(r, "limit", 100)}
+		BeforeID: queryInt64(r, "before_id"), Limit: clampLimit(queryInt(r, "limit", 100), 100)}
+	var err error
+	if lq.List, err = logListSpec.parse(q); err != nil {
+		return lq, err
+	}
 	for _, k := range q["kind"] {
 		for _, v := range strings.Split(k, ",") {
 			if v = strings.TrimSpace(v); v != "" {
@@ -106,7 +140,6 @@ func logQueryFrom(r *http.Request) (LogQuery, error) {
 			}
 		}
 	}
-	var err error
 	if lq.Since, err = parseTimeArg(q.Get("since")); err != nil {
 		return lq, err
 	}
@@ -124,12 +157,34 @@ func (a *Admin) listLogs(w http.ResponseWriter, r *http.Request) {
 		errJSON(w, 400, err.Error())
 		return
 	}
+	if r.URL.Query().Get("format") == "csv" {
+		lq.List.Offset = 0
+		a.exportLogs(w, r, lq)
+		return
+	}
 	rows, next, err := QueryLogs(r.Context(), a.app.db, lq)
 	if err != nil {
 		errJSON(w, 400, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"items": rows, "next_before_id": next})
+	total, err := CountLogs(r.Context(), a.app.db, lq)
+	if err != nil {
+		errJSON(w, 400, err.Error())
+		return
+	}
+	writeJSON(w, 200, pageJSON(rows, next, total, lp(lq), lq.Limit))
+}
+
+func lp(q LogQuery) ListParams { return q.List }
+
+// pageJSON is the list response: items plus what the UI needs to page.
+func pageJSON[T any, C comparable](items []T, next C, total int64, p ListParams, limit int) map[string]any {
+	sorts := p.Sorts
+	if sorts == nil {
+		sorts = []string{}
+	}
+	return map[string]any{"items": items, "next_before_id": next, "total": total,
+		"offset": p.Offset, "limit": limit, "sort": sorts}
 }
 
 func (a *Admin) summaryLogs(w http.ResponseWriter, r *http.Request) {

@@ -136,12 +136,33 @@ func NewApp(ctx context.Context, cfg *StaticConfig) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dynamic config: %w", err)
 	}
+	var seen map[string]bool
 	store.onReload = func(ok bool) {
 		// Pooled keep-alive connections skip the dial-time guard, so drop them
 		// whenever rules change; revoked destinations stop working at once.
 		if app.proxy != nil {
 			app.proxy.tr.CloseIdleConnections()
 			app.forward.client.CloseIdleConnections()
+		}
+		// When access.json or a route changes, log the access notes that are new
+		// (e.g. "webhook x accepts requests from any address without auth").
+		if seen == nil {
+			seen = map[string]bool{}
+			for _, n := range app.notes {
+				seen[n.Level+n.Message] = true
+			}
+		}
+		next, fresh := map[string]bool{}, []DeployNote(nil)
+		for _, n := range accessNotes(app.cfg, store.snap.Load(), app.env) {
+			next[n.Level+n.Message] = true
+			if !seen[n.Level+n.Message] {
+				fresh = append(fresh, n)
+			}
+		}
+		seen = next
+		if len(fresh) > 0 {
+			slog.Info("access rules changed", "kind", "deploy", "topic", "access")
+			logDeploymentNotes(fresh)
 		}
 		res := "ok"
 		if !ok {
@@ -359,12 +380,16 @@ type runningServer struct {
 }
 
 // Handlers with base paths applied, as served (also used by tests).
+// The proxy and the console check their access.json allowlist before anything else.
+func (app *App) proxyHandler() http.Handler { return app.accessGuard("proxy", app.proxy) }
+
 func (app *App) webhookHandler() http.Handler {
-	return stripBasePath(app.cfg.WebhookBasePath, app.inbound.Handler())
+	// each route checks its allowed_ips; every call is captured in full (RQH/RQB/RSH/RSB)
+	return app.captureInbound(stripBasePath(app.cfg.WebhookBasePath, app.inbound.Handler()))
 }
 
 func (app *App) adminHandler() http.Handler {
-	return stripBasePath(app.cfg.AdminBasePath, app.admin.Handler())
+	return app.accessGuard("admin", stripBasePath(app.cfg.AdminBasePath, app.admin.Handler()))
 }
 
 // openListeners binds every listener (with TLS where configured) plus any
@@ -380,7 +405,7 @@ func (app *App) openListeners() ([]runningServer, error) {
 	}{
 		// The proxy strips its base path itself: absolute-URL proxy requests
 		// carry the destination's path, which must never be rewritten.
-		{"proxy", &http.Server{Addr: cfg.ProxyAddr, Handler: app.proxy, ReadHeaderTimeout: 10 * time.Second}, cfg.ProxyTLS, true},
+		{"proxy", &http.Server{Addr: cfg.ProxyAddr, Handler: app.proxyHandler(), ReadHeaderTimeout: 10 * time.Second}, cfg.ProxyTLS, true},
 		{"webhook", &http.Server{Addr: cfg.WebhookAddr, Handler: app.webhookHandler(), ReadHeaderTimeout: 10 * time.Second,
 			ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second}, cfg.WebhookTLS, false},
 		{"admin", &http.Server{Addr: cfg.AdminAddr, Handler: app.adminHandler(), ReadHeaderTimeout: 10 * time.Second,

@@ -10,8 +10,9 @@
   "methods": [
     "POST"
   ],
-  "source_cidrs": [
-    "52.66.0.0/16"
+  "allowed_ips": [
+    "203.0.113.0/24",
+    "198.51.100.*"
   ],
   "auth": {
     "hmac": {

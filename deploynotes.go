@@ -7,11 +7,12 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -209,21 +210,8 @@ func deploymentNotes(cfg *StaticConfig, snap *snapshot, env hostEnv, envAdminTok
 	if cfg.WebhookBasePath != "" {
 		n.add("info", "webhook", "webhooks at %s/hooks/<id>, ingest and health under %s/ (requests work with or without the prefix)", cfg.WebhookBasePath, cfg.WebhookBasePath)
 	}
-	var open []string
-	for id, w := range snap.webhooks {
-		if !w.Disabled && w.Auth == nil && len(w.SourceCIDRs) == 0 {
-			open = append(open, "webhook "+id)
-		}
-	}
-	for _, r := range snap.ingest {
-		if !r.Disabled && r.Auth == nil && len(r.SourceCIDRs) == 0 {
-			open = append(open, "ingest rule "+r.ID)
-		}
-	}
-	sort.Strings(open)
-	for _, o := range open {
-		n.add("warn", "webhook", "%s accepts requests from anyone: add auth (token, basic or hmac) or source_cidrs", o)
-	}
+	// ---- access: proxy/console allowlists and each route's allowed_ips ----
+	n = append(n, accessNotes(cfg, snap, env)...)
 
 	// ---- admin ----
 	_, _, adminLoop := listenScope(cfg.AdminAddr)
@@ -261,6 +249,19 @@ func deploymentNotes(cfg *StaticConfig, snap *snapshot, env hostEnv, envAdminTok
 	// ---- storage / telemetry ----
 	if cfg.Database.StoreEventBodies {
 		n.add("info", "storage", "callback bodies are kept for %d days (store_event_bodies); set it to false if payloads must not be retained", cfg.Database.RetentionDays)
+	}
+	if db := cfg.Database; db.CapturePayloads {
+		if db.CaptureMaxBodyBytes > 0 {
+			n.add("info", "storage", "every logged API call keeps its full request and response (headers and bodies up to %s each) for %d days; HTTPS tunnels keep the CONNECT exchange only", humanBytes(db.CaptureMaxBodyBytes), db.RetentionDays)
+		} else {
+			n.add("info", "storage", "every logged API call keeps its request and response headers (capture_max_body_bytes is 0: no bodies) for %d days", db.RetentionDays)
+		}
+		n.add("warn", "storage", "captured headers and bodies are stored unmasked, including credentials (Authorization, tokens, profile credentials): editor tokens see them in full, viewer tokens see them masked; protect the database file and keep editor tokens to people who may see provider credentials")
+		if !db.StoreEventBodies {
+			n.add("warn", "storage", "store_event_bodies is false, but capture_payloads still keeps request and response bodies in the logs for %d days; set database.capture_payloads to false as well if payloads must not be retained", db.RetentionDays)
+		}
+	} else {
+		n.add("info", "storage", "capture_payloads is false: logs keep call metadata only, no headers or bodies")
 	}
 	if strings.EqualFold(cfg.Database.LogLevel, "debug") {
 		n.add("info", "storage", "log_level is debug: the log table will grow quickly")
@@ -338,4 +339,97 @@ func logDeploymentNotes(ns []DeployNote) {
 		}
 		slog.Log(context.Background(), level, d.Message, "kind", "deploy", "topic", d.Topic)
 	}
+}
+
+// accessNotes explains who may use the proxy and the console (access.json)
+// and who may call each webhook and ingest rule (allowed_ips). They are part
+// of the startup notes and new ones are logged whenever the files change.
+func accessNotes(cfg *StaticConfig, snap *snapshot, env hostEnv) []DeployNote {
+	var n notes
+	ac := snap.access
+	if ac == nil {
+		ac = emptyAccess()
+	}
+	public := netip.MustParseAddr("8.8.8.8")
+	restricted := false
+	what := map[string]string{"proxy": "forward proxy and /forward", "admin": "console and API"}
+	for _, name := range []string{"proxy", "admin"} {
+		l := ac.list(name)
+		list := strings.Join(l.Allow, ", ")
+		_, open := l.list.Match(public)
+		switch {
+		case len(l.Allow) == 0:
+			n.add("error", "access", "%s: access.json %s.allow is empty, so every client is refused (403); add addresses, wildcards (10.0.*.*) or CIDRs", what[name], name)
+			restricted = true
+		case slices.Contains(l.Allow, "*"):
+			if name == "admin" {
+				n.add("warn", "access", "console and API accept connections from any address (admin.allow has \"*\"): only the token protects them; list your office/VPN addresses instead")
+			} else {
+				n.add("warn", "access", "forward proxy accepts connections from any address (proxy.allow has \"*\"): anyone holding a client token can send traffic from this server's IP; list your application servers instead")
+			}
+		case slices.Equal(l.Allow, defaultAllow):
+			restricted = true
+			n.add("info", "access", "%s accept only loopback and private networks (the restricted default: %s)", what[name], list)
+		default:
+			restricted = true
+			level := "info"
+			if open {
+				level = "warn" // a public catch-all such as 0.0.0.0/0 or *.*.*.*
+			}
+			n.add(level, "access", "%s accept only: %s", what[name], list)
+		}
+	}
+	// A loopback-only console whose allowlist excludes loopback cannot be reached at all.
+	if h, _, _ := net.SplitHostPort(cfg.AdminAddr); h == "127.0.0.1" || h == "::1" || h == "localhost" {
+		_, v4 := ac.Admin.list.Match(netip.MustParseAddr("127.0.0.1"))
+		_, v6 := ac.Admin.list.Match(netip.MustParseAddr("::1"))
+		if !v4 && !v6 {
+			n.add("error", "access", "the console listens on %s only, but admin.allow does not include 127.0.0.1 or ::1: nobody can reach it; fix access.json", cfg.AdminAddr)
+		}
+	}
+
+	// Each webhook / ingest rule decides who may call it.
+	route := func(label string, disabled bool, o *RouteOptions) {
+		if disabled {
+			return
+		}
+		_, open := o.ips.Match(public)
+		switch {
+		case o.restrictedDefault():
+			restricted = true
+			n.add("warn", "access", "%s accepts only loopback and private-network senders (the restricted default): providers on the internet get 403; set allowed_ips in its file (e.g. [\"52.66.*.*\", \"13.232.0.0/16\"], or [\"*\"] with auth)", label)
+		case open && o.Auth == nil:
+			n.add("warn", "access", "%s accepts requests from any address without auth: add auth (token, basic or hmac) or narrow allowed_ips", label)
+		case open:
+			n.add("info", "access", "%s accepts any address; requests must pass its auth", label)
+		default:
+			restricted = true
+			n.add("info", "access", "%s accepts only: %s", label, strings.Join(o.allowedIPs(), ", "))
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(snap.webhooks)) {
+		w := snap.webhooks[id]
+		route("webhook "+id, w.Disabled, &w.RouteOptions)
+	}
+	for _, r := range snap.ingest {
+		route("ingest rule "+r.ID, r.Disabled, &r.RouteOptions)
+	}
+
+	if restricted && env.Container != "" {
+		n.add("warn", "access", "allowlists see the address that reaches the container: with rootless Podman or Docker's userland proxy, published ports can show the gateway instead of the real client; check the source_ip in the logs, and prefer a reverse proxy listed in trusted_proxies")
+	}
+	if restricted && len(cfg.TrustedProxies) == 0 {
+		n.add("info", "access", "allowlists are checked against the connecting address; behind a reverse proxy, list it in trusted_proxies so the real client address is checked")
+	}
+	return n
+}
+
+func humanBytes(n int64) string {
+	switch {
+	case n >= 1<<20 && n%(1<<20) == 0:
+		return fmt.Sprintf("%d MiB", n>>20)
+	case n >= 1<<10 && n%(1<<10) == 0:
+		return fmt.Sprintf("%d KiB", n>>10)
+	}
+	return fmt.Sprintf("%d bytes", n)
 }

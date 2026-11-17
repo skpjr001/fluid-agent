@@ -71,6 +71,14 @@ var migrations = []string{
 	CREATE INDEX deliveries_due   ON deliveries(status, next_at);
 	CREATE INDEX deliveries_event ON deliveries(event_id);
 	CREATE INDEX deliveries_route ON deliveries(route, created_at);`,
+
+	// 2: full request/response capture for logged API calls (RQH, RQB, RSH, RSB).
+	`ALTER TABLE logs ADD COLUMN rq_headers TEXT;
+	ALTER TABLE logs ADD COLUMN rq_body BLOB;
+	ALTER TABLE logs ADD COLUMN rq_size INTEGER;
+	ALTER TABLE logs ADD COLUMN rs_headers TEXT;
+	ALTER TABLE logs ADD COLUMN rs_body BLOB;
+	ALTER TABLE logs ADD COLUMN rs_size INTEGER;`,
 }
 
 type DB struct {
