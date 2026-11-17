@@ -122,7 +122,7 @@ func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rules := fp.store.Rules()
 
 	if !tokenOK(r.Header.Get("Proxy-Authorization"), rules.Tokens) {
-		w.Header().Set("Proxy-Authenticate", `Basic realm="proxy-agent"`)
+		w.Header().Set("Proxy-Authenticate", `Basic realm="fluid-agent"`)
 		http.Error(w, "proxy auth required", http.StatusProxyAuthRequired)
 		slog.Warn("proxy auth failed", "client", r.RemoteAddr, "host", r.Host)
 		return

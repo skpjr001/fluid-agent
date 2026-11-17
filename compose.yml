@@ -1,6 +1,6 @@
 # Webhook ingress goes through Traefik (TLS); forward proxy + admin stay off Traefik.
 services:
-  proxy-agent:
+  fluid-agent:
     build: .
     restart: unless-stopped
     environment:

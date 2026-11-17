@@ -4,6 +4,5 @@ config.json
 dynamic/webhooks/*.json
 
 # Build output
-/proxy-agent
 /fluid-agent
 *.exe

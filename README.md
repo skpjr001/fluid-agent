@@ -1,4 +1,4 @@
-# proxy-agent
+# fluid-agent
 
 Single Go binary, zero dependencies. Runs three listeners on the whitelisted server:
 
@@ -24,9 +24,9 @@ dynamic/
 ## Run
 
 ```bash
-go build -o proxy-agent .
+go build -o fluid-agent .
 cp config.example.json config.json   # set admin_token or export PROXY_ADMIN_TOKEN
-./proxy-agent -config config.json
+./fluid-agent -config config.json
 ```
 
 Docker/Traefik: `cp config.docker.json config.json`, put `PROXY_ADMIN_TOKEN=...` in `.env`, edit the host in `compose.yml`, then `docker compose up -d` (or `podman-compose`).
