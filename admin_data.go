@@ -257,6 +257,8 @@ func (a *Admin) stream(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-a.app.hub.Done(): // agent shutting down: end the stream so Shutdown is not held up
+			return
 		case <-ping.C:
 			fmt.Fprint(w, ": ping\n\n")
 			fl.Flush()

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -47,6 +48,10 @@ type App struct {
 	tracing bool
 	env     hostEnv
 	notes   []DeployNote
+
+	draining  atomic.Bool       // shutting down: /readyz answers 503
+	addrs     map[string]string // listener name -> bound address; set before listening is closed
+	listening chan struct{}     // closed once every listener accepts connections
 }
 
 const usage = `fluid-agent — forward proxy, webhook relay and callback ingest for IP-allowlisted servers
@@ -109,6 +114,10 @@ func cmdServe(args []string) error {
 	created := bootstrap(*cfgPath, cfg, existed, len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		stop() // restore default handling: a second signal ends the process at once
+	}()
 	app, err := NewApp(ctx, cfg)
 	if err != nil {
 		return err
@@ -119,7 +128,7 @@ func cmdServe(args []string) error {
 
 // NewApp opens the database, loads config and builds every component.
 func NewApp(ctx context.Context, cfg *StaticConfig) (*App, error) {
-	app := &App{cfg: cfg, hub: NewHub(), metrics: NewMetrics(), started: time.Now()}
+	app := &App{cfg: cfg, hub: NewHub(), metrics: NewMetrics(), started: time.Now(), listening: make(chan struct{})}
 	app.metrics.registerHelp()
 	stdout := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	slog.SetDefault(slog.New(stdout))
@@ -197,6 +206,10 @@ func NewApp(ctx context.Context, cfg *StaticConfig) (*App, error) {
 }
 
 func (app *App) readyz(w http.ResponseWriter, r *http.Request) {
+	if app.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ready": false, "draining": true})
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 	if err := app.db.PingContext(ctx); err != nil {
@@ -232,7 +245,9 @@ func (app *App) Serve(ctx context.Context) error {
 		return err
 	}
 	errc := make(chan error, len(running))
+	app.addrs = map[string]string{}
 	for _, rs := range running {
+		app.addrs[rs.name] = rs.ln.Addr().String()
 		slog.Info("listening", "kind", "system", "server", rs.name, "addr", rs.ln.Addr().String(), "scheme", rs.scheme)
 		go func(rs runningServer) {
 			if err := rs.srv.Serve(rs.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -241,24 +256,14 @@ func (app *App) Serve(ctx context.Context) error {
 		}(rs)
 	}
 	slog.Info("fluid-agent started", "kind", "system", "version", version)
+	close(app.listening)
 
 	select {
 	case <-ctx.Done():
 	case err = <-errc:
 		slog.Error("server failed", "kind", "system", "err", err)
 	}
-	slog.Info("shutting down", "kind", "system")
-	sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	for _, rs := range running {
-		rs.srv.Shutdown(sctx)
-	}
-	close(stopWatch)
-	cancelBG()
-	bgWG.Wait()
-	shutdownTracing(sctx)
-	app.sink.Close()
-	app.db.Close()
+	app.shutdown(running, stopWatch, cancelBG, &bgWG, shutdownTracing)
 	return err
 }
 
@@ -287,6 +292,76 @@ func (app *App) housekeeping(ctx context.Context) {
 			app.inbound.limiter.Sweep(10 * time.Minute)
 		}
 	}
+}
+
+// shutdown stops the agent gracefully:
+//  1. /readyz starts failing; with shutdown_delay the listeners keep serving
+//     that long so load balancers stop sending new requests;
+//  2. live streams end, listeners stop accepting, and in-flight requests,
+//     CONNECT tunnels and deliveries get shutdown_timeout to finish;
+//  3. at the deadline, remaining connections and tunnels are closed and
+//     unfinished deliveries are requeued (attempt not counted), never lost;
+//  4. logs are flushed and the database is closed.
+//
+// A second SIGINT/SIGTERM ends the process at once.
+func (app *App) shutdown(running []runningServer, stopWatch chan struct{}, cancelBG context.CancelFunc,
+	bgWG *sync.WaitGroup, shutdownTracing func(context.Context) error) {
+	start := time.Now()
+	timeout, delay := app.cfg.ShutdownTimeout.D(), app.cfg.ShutdownDelay.D()
+	app.draining.Store(true)
+	slog.Info("shutting down gracefully (send the signal again to stop at once)", "kind", "system",
+		"timeout", timeout.String(), "delay", delay.String(), "open_tunnels", app.proxy.tunnels.Load(),
+		"deliveries_in_flight", app.outbox.Counts(context.Background())["inflight"])
+	if delay > 0 {
+		slog.Info("readiness now fails; still serving during shutdown_delay", "kind", "system", "delay", delay.String())
+		time.Sleep(delay)
+	}
+
+	deadline, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	app.hub.Close() // live streams never go idle; end them so Shutdown can finish
+	close(stopWatch)
+	cancelBG() // outbox stops claiming new deliveries; in-flight ones continue
+
+	var wg sync.WaitGroup
+	var forced, tunnelsClosed atomic.Int64
+	for _, rs := range running {
+		wg.Add(1)
+		go func(rs runningServer) {
+			defer wg.Done()
+			if err := rs.srv.Shutdown(deadline); err != nil {
+				forced.Add(1)
+				rs.srv.Close() // deadline reached: close what is left
+			}
+		}(rs)
+	}
+	wg.Add(1)
+	go func() { defer wg.Done(); tunnelsClosed.Store(int64(app.proxy.DrainTunnels(deadline))) }()
+	bgDone := make(chan struct{})
+	go func() { bgWG.Wait(); close(bgDone) }()
+	select {
+	case <-bgDone:
+	case <-deadline.Done():
+		app.outbox.abort() // requeue deliveries still in flight
+		<-bgDone
+	}
+	wg.Wait()
+
+	if n := forced.Load(); n > 0 {
+		slog.Warn("shutdown timeout reached: closed remaining connections", "kind", "system", "listeners", n)
+	}
+	if n := tunnelsClosed.Load(); n > 0 {
+		slog.Warn("shutdown timeout reached: closed open CONNECT tunnels", "kind", "system", "tunnels", n)
+	}
+	if n := app.outbox.interrupted.Load(); n > 0 {
+		slog.Warn("deliveries interrupted by shutdown were requeued", "kind", "system", "deliveries", n)
+	}
+	tctx, tcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownTracing(tctx)
+	tcancel()
+	slog.Info("shutdown complete", "kind", "system", "took", time.Since(start).Round(time.Millisecond).String())
+	app.sink.Close()
+	app.db.Close()
 }
 
 // ---------- check ----------

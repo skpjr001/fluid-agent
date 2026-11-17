@@ -88,6 +88,16 @@
       "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
       "description": "Go duration string, e.g. \"30s\", \"5m\"."
     },
+    "shutdown_timeout": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "Graceful shutdown (SIGTERM/SIGINT): time to finish in-flight requests, CONNECT tunnels and deliveries before they are closed (unfinished deliveries are requeued, not lost). Container stop timeouts must be longer. Default 15s."
+    },
+    "shutdown_delay": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "Keep serving this long after SIGTERM while /readyz reports draining (503), so load balancers stop sending first. Default 0s."
+    },
     "webhook_rate_limit": {
       "$ref": "#/$defs/rateLimit"
     },

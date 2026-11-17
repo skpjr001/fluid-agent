@@ -70,6 +70,54 @@ type ForwardProxy struct {
 	sem     chan struct{}
 	tr      *http.Transport
 	tunnels atomic.Int64
+
+	// open CONNECT tunnels (hijacked, so http.Server.Shutdown does not see them)
+	tmu   sync.Mutex
+	tconn map[net.Conn]struct{}
+}
+
+func (fp *ForwardProxy) track(cs ...net.Conn) {
+	fp.tmu.Lock()
+	defer fp.tmu.Unlock()
+	if fp.tconn == nil {
+		fp.tconn = map[net.Conn]struct{}{}
+	}
+	for _, c := range cs {
+		fp.tconn[c] = struct{}{}
+	}
+}
+
+func (fp *ForwardProxy) untrack(cs ...net.Conn) {
+	fp.tmu.Lock()
+	defer fp.tmu.Unlock()
+	for _, c := range cs {
+		delete(fp.tconn, c)
+	}
+}
+
+// DrainTunnels waits for open tunnels to finish until ctx ends, then closes
+// the rest. It returns how many were closed by force.
+func (fp *ForwardProxy) DrainTunnels(ctx context.Context) int {
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for fp.tunnels.Load() > 0 {
+		select {
+		case <-ctx.Done():
+			fp.tmu.Lock()
+			n := len(fp.tconn) / 2
+			for c := range fp.tconn {
+				c.Close()
+			}
+			fp.tmu.Unlock()
+			// let the tunnel goroutines log and exit
+			for i := 0; i < 40 && fp.tunnels.Load() > 0; i++ {
+				time.Sleep(50 * time.Millisecond)
+			}
+			return n
+		case <-t.C:
+		}
+	}
+	return 0
 }
 
 func NewForwardProxy(app *App) *ForwardProxy {
@@ -266,6 +314,8 @@ func (fp *ForwardProxy) tunnel(w http.ResponseWriter, r *http.Request, dest, cli
 	}
 	fp.tunnels.Add(1)
 	defer fp.tunnels.Add(-1)
+	fp.track(cl, up)
+	defer fp.untrack(cl, up)
 
 	idle := fp.app.cfg.TunnelIdleTimeout.D()
 	upC, clC := &idleConn{Conn: up, timeout: idle}, &idleConn{Conn: cl, timeout: idle}

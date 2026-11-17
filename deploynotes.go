@@ -246,6 +246,13 @@ func deploymentNotes(cfg *StaticConfig, snap *snapshot, env hostEnv, envAdminTok
 		n.add("info", "admin", "only viewer tokens: configuration can be changed only by editing files")
 	}
 
+	// ---- shutdown ----
+	if env.Container != "" {
+		n.add("info", "runtime", "graceful shutdown takes up to %s (shutdown_timeout): the container stop timeout must be longer (Docker's default is 10s; set stop_grace_period: 30s, docker stop -t 30, or terminationGracePeriodSeconds in Kubernetes)", cfg.ShutdownTimeout.D())
+	} else if env.Systemd {
+		n.add("info", "runtime", "graceful shutdown takes up to %s (shutdown_timeout): keep TimeoutStopSec longer (the provided unit uses 30s)", cfg.ShutdownTimeout.D())
+	}
+
 	// ---- storage / telemetry ----
 	if cfg.Database.StoreEventBodies {
 		n.add("info", "storage", "callback bodies are kept for %d days (store_event_bodies); set it to false if payloads must not be retained", cfg.Database.RetentionDays)

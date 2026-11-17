@@ -506,6 +506,7 @@ fi
   echo "    image: fluid-agent:local"
   echo "    container_name: $CONTAINER"
   echo "    restart: unless-stopped"
+  echo "    stop_grace_period: 30s   # longer than the agent's shutdown_timeout (15s), so in-flight work finishes"
   echo "    volumes:"
   echo "      - ./config.json:/app/config.json:ro"
   echo "      - $DYN_MOUNT:/app/dynamic"

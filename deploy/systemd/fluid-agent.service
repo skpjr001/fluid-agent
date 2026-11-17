@@ -29,6 +29,9 @@ ExecStart=/usr/local/bin/fluid-agent serve -config /var/lib/fluid-agent/config.j
 # EnvironmentFile=-/etc/fluid-agent/agent.env
 Restart=always
 RestartSec=3
+# Graceful shutdown: SIGTERM, then up to shutdown_timeout (15s) to finish in-flight work.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
 LimitNOFILE=65536
 
 # Hardening: the agent only writes to its StateDirectory (config, API edits, database).

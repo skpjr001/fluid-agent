@@ -272,6 +272,17 @@ curl -H "$A" http://127.0.0.1:9000/metrics                         # Prometheus
 
 Health: `/healthz`, `/livez` and `/readyz` on the webhook listener; `fluid-agent healthcheck` for container health checks.
 
+### Graceful shutdown
+
+On `SIGTERM` or `SIGINT` (`docker stop`, `systemctl stop`, Ctrl-C) the agent:
+
+1. makes `/readyz` answer `503 {"draining": true}`; with `shutdown_delay` (default `0s`) it keeps serving that long so load balancers stop sending first;
+2. stops accepting connections and ends console live streams, then gives in-flight work `shutdown_timeout` (default `15s`) to finish: requests (including sync webhooks waiting on their target), open `CONNECT` tunnels, and background deliveries;
+3. at the deadline closes what is left; a delivery still in flight is **requeued with its attempt not counted** and resumes on the next start, so nothing is lost;
+4. flushes logs and traces, closes the database, and logs `shutdown complete` with how long it took.
+
+A second signal stops it at once. Container and service stop timeouts must be longer than `shutdown_timeout`: the provided Compose files set `stop_grace_period: 30s` (Docker's default is 10s), the systemd unit `TimeoutStopSec=30s`; in Kubernetes keep `terminationGracePeriodSeconds` above it (the default 30s is fine).
+
 ## Tracing
 
 Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenTelemetry traces over OTLP/HTTP. Incoming `traceparent` headers are continued; background deliveries join the trace of the call that produced them, and log rows record the trace id.

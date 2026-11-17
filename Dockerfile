@@ -16,5 +16,6 @@ WORKDIR /app
 USER nonroot
 EXPOSE 8080 8081 9000
 VOLUME ["/app/data"]
+STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s CMD ["/fluid-agent", "healthcheck", "-config", "/app/config.json"]
 ENTRYPOINT ["/fluid-agent", "-config", "/app/config.json"]

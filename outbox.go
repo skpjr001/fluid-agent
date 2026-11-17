@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -78,12 +79,21 @@ type Outbox struct {
 	client *http.Client
 	wake   chan struct{}
 	wg     sync.WaitGroup
+
+	// Graceful shutdown: Run stops claiming when its context ends; attempts
+	// still in flight at the shutdown deadline are aborted and requeued.
+	abortCtx    context.Context
+	abort       context.CancelFunc
+	interrupted atomic.Int64
 }
 
 func NewOutbox(app *App) *Outbox {
+	abortCtx, abort := context.WithCancel(context.Background())
 	return &Outbox{
-		app:  app,
-		wake: make(chan struct{}, 1),
+		app:      app,
+		abortCtx: abortCtx,
+		abort:    abort,
+		wake:     make(chan struct{}, 1),
 		client: &http.Client{
 			// Targets are configured by editors and are often internal hosts,
 			// so the private-address guard is not applied here. Redirects are
@@ -380,7 +390,17 @@ func (o *Outbox) deliverAsync(ctx context.Context, d Delivery) {
 		o.finish(d, "dead", 0, 0, "route "+ev.Route+" no longer exists")
 		return
 	}
-	res := o.attempt(contextFromTraceparent(ev.Traceparent), ev, d, opts, false)
+	actx, cancel := context.WithCancel(contextFromTraceparent(ev.Traceparent))
+	defer cancel()
+	stop := context.AfterFunc(o.abortCtx, cancel) // shutdown deadline reached
+	defer stop()
+	res := o.attempt(actx, ev, d, opts, false)
+	if res.err != nil && o.abortCtx.Err() != nil {
+		// Interrupted by shutdown, not the target's fault: back to the queue
+		// with the attempt not counted; it resumes on the next start.
+		o.requeue(d)
+		return
+	}
 	d.Attempts++
 	o.logAttempt(ev, d, res)
 	switch {
@@ -392,6 +412,19 @@ func (o *Outbox) deliverAsync(ctx context.Context, d Delivery) {
 	default:
 		o.finish(d, "dead", res.status, res.ms, res.err.Error())
 	}
+}
+
+// requeue returns an interrupted delivery to pending, due now.
+func (o *Outbox) requeue(d Delivery) {
+	o.interrupted.Add(1)
+	now := nowMs()
+	if _, err := o.app.db.Exec(`UPDATE deliveries SET status='pending', next_at=?, updated_at=? WHERE id=? AND status='inflight'`,
+		now, now, d.ID); err != nil {
+		slog.Error("requeue after shutdown failed (recovered on next start)", "kind", "outbox", "delivery_id", d.ID, "err", err)
+		return
+	}
+	slog.Warn("delivery interrupted by shutdown; it resumes on the next start", "kind", "delivery", "direction", "outbound",
+		"route", d.Route, "url", d.Target, "delivery_id", d.ID, "event_id", d.EventID)
 }
 
 // DeliverSync performs a sync delivery inline (with the route's retries) and

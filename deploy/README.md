@@ -43,6 +43,7 @@ At startup the agent inspects how it is running and logs every caveat that appli
 | Webhooks | plain HTTP with no trusted reverse proxy (warn); which proxies are trusted; over-broad `trusted_proxies` (warn); every route without auth or `source_cidrs` (warn) |
 | Console | plain HTTP on all interfaces (warn on a host; publish-to-localhost advice in a container); base path or `X-Forwarded-Prefix`; no tokens / viewer-only tokens |
 | TLS | certificate names and expiry, expiring within 21 days (warn), expired (error), missing SANs (warn); ACME directory, challenge type, and an unreachable challenge (warn) |
+| Shutdown | in a container or under systemd: how long a graceful stop can take (`shutdown_timeout`) and the stop timeout it needs (Compose `stop_grace_period`, `TimeoutStopSec`) |
 
 `fluid-agent logs -kind deploy -since 1h` lists them again later.
 

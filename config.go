@@ -35,6 +35,8 @@ type StaticConfig struct {
 	MaxBodyBytes      int64           `json:"max_body_bytes"`        // inbound webhook/forward body cap
 	TrustedProxies    []string        `json:"trusted_proxies"`       // CIDRs whose X-Forwarded-For is believed
 	TunnelIdleTimeout Duration        `json:"tunnel_idle_timeout"`   // close CONNECT tunnels idle this long
+	ShutdownTimeout   Duration        `json:"shutdown_timeout"`      // graceful shutdown: time to finish in-flight work
+	ShutdownDelay     Duration        `json:"shutdown_delay"`        // keep serving this long after SIGTERM while /readyz fails
 	WebhookRateLimit  RateLimit       `json:"webhook_rate_limit"`    // default per-source-IP limit on ingress
 	Forward           ForwardSettings `json:"forward"`
 	Database          DatabaseConfig  `json:"database"`
@@ -111,6 +113,7 @@ func defaultStatic() *StaticConfig {
 		MaxConns:          2000,
 		MaxBodyBytes:      10 << 20,
 		TunnelIdleTimeout: Duration(5 * time.Minute),
+		ShutdownTimeout:   Duration(15 * time.Second),
 		WebhookRateLimit:  RateLimit{RequestsPerMinute: 600, Burst: 100},
 		Forward: ForwardSettings{
 			MaxResponseBytes: 10 << 20,
@@ -233,6 +236,12 @@ func (c *StaticConfig) validate() error {
 	}
 	if c.Database.Path == "" {
 		errs = append(errs, errors.New("database.path is required"))
+	}
+	if c.ShutdownTimeout.D() < time.Second || c.ShutdownTimeout.D() > 10*time.Minute {
+		errs = append(errs, errors.New("shutdown_timeout must be between 1s and 10m"))
+	}
+	if c.ShutdownDelay.D() < 0 || c.ShutdownDelay.D() > 5*time.Minute {
+		errs = append(errs, errors.New("shutdown_delay must be between 0s and 5m"))
 	}
 	if c.Database.CaptureMaxBodyBytes < 0 {
 		errs = append(errs, errors.New("database.capture_max_body_bytes must be >= 0 (0 stores headers only)"))
