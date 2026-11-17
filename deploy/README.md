@@ -63,10 +63,32 @@ At startup the agent inspects how it is running and logs every caveat that appli
 * `proxy_tls` makes the proxy an *HTTPS proxy*: `HTTPS_PROXY=https://name:<token>@agent:8443`. It is HTTP/1.1-only so `CONNECT` works. curl, Go and most modern clients support https:// proxy URLs; some SDKs only accept http://.
 * Ports below 1024 need `CAP_NET_BIND_SERVICE` (systemd: `AmbientCapabilities=CAP_NET_BIND_SERVICE`) or a container port mapping.
 
+## Installer for a Linux VM
+
+[`install.sh`](install.sh) sets up a VM from scratch and runs the agent in Docker:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/skpjr001/fluid-agent/main/deploy/install.sh | sudo bash   # interactive
+sudo bash install.sh --yes --expose-ui 127.0.0.1:9000 --expose-webhook 0.0.0.0:8081               # unattended
+```
+
+1. **Checks** the OS and CPU (amd64/arm64), init system, memory, free disk where Docker keeps its data (stops when too low), package manager and internet access.
+2. **Installs what is missing**: curl, tar and CA certificates; Docker Engine and the Compose plugin from Docker's official repositories (apt/dnf/yum; Compose as a verified binary on Amazon Linux and SUSE). Without systemd it starts `dockerd` itself. Go is offered but not needed: the image is built from the checksum-verified release binary (or from git with `--source`).
+3. **Asks**, each with a safe default:
+   * storage: **Docker volumes** `fluid-agent-data` and `fluid-agent-dynamic` (default) or host directories (owned by the container user 65532);
+   * whether to publish the **proxy** (8080), the **webhook listener** (8081) and the **console** (9000) on the host, one by one, **default: not exposed**; for each one exposed, the bind address (`127.0.0.1` or `0.0.0.0`) and host port;
+   * which client IPs may use the proxy and the console (`access.json`; webhook senders are set per route with `allowed_ips`).
+4. **Runs** it with Docker Compose in `/opt/fluid-agent` (`config.json`, `docker-compose.yml`, a copy of the installer), waits until healthy, and prints the URLs, how to read the generated editor token, and how to manage it.
+
+Re-running upgrades to the latest release and keeps config, data and earlier answers (pass new `--expose-*` / `--allow-*` values to change them). `--uninstall` removes the container and keeps the data; `--uninstall --purge` deletes everything after confirmation. `--help` lists every option; every question also has a flag, so `--yes` installs unattended.
+
+Tested on Ubuntu 24.04 (volumes and host directories, interactive and unattended, upgrade, allowlist enforcement, uninstall/purge) and Rocky Linux 9.
+
 ## Files
 
 | Path | What |
 |---|---|
+| [`install.sh`](install.sh) | VM installer: checks, installs Docker, runs the agent in a container, asks what to expose |
 | [`systemd/fluid-agent.service`](systemd/fluid-agent.service) | Hardened unit for a host install |
 | [`nginx/fluid-agent.conf`](nginx/fluid-agent.conf) + [`fluid-proxy.conf`](nginx/fluid-proxy.conf) | Subdomains, one domain with paths (stripped and not), `stream {}` for the proxy |
 | [`traefik/compose.yml`](traefik/compose.yml) | Traefik v3: subdomain, path with StripPrefix, TCP router for the proxy, Let's Encrypt |

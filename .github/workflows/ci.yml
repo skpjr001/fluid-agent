@@ -35,6 +35,9 @@ jobs:
       - name: UI script syntax
         run: node --check ui/app.js
 
+      - name: Installer lint
+        run: bash -n deploy/install.sh && shellcheck -S warning deploy/install.sh
+
       - name: Example configs validate
         run: |
           go run . check -config config.example.json || true   # ./dynamic is git-ignored

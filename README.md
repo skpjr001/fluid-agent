@@ -14,6 +14,14 @@ Everything is stored in one SQLite file (logs, events, deliveries) and all confi
 
 No setup is needed: on first start the agent creates every directory and config file it is missing (see [First start](#first-start-what-is-created)).
 
+**On a fresh Linux VM** (Ubuntu, Debian, Fedora, RHEL/Rocky/Alma, Amazon Linux), the installer checks the system, installs Docker if needed and runs the agent in a container:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/skpjr001/fluid-agent/main/deploy/install.sh | sudo bash
+```
+
+It asks whether to expose the proxy, the webhook listener and the console on the host, each separately and **not exposed by default**, where to keep data (Docker volumes by default, or host directories), and which client IPs may use the proxy and console. See [deploy/README.md](deploy/README.md#installer-for-a-linux-vm).
+
 **On a host**
 
 ```bash
