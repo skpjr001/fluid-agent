@@ -88,3 +88,13 @@ curl -H "$A" -X POST $API/reload                         # force reload
 - Keep `allowed_hosts` to the exact providers you need. Never use `*`.
 - Keep admin on localhost and reach it via `ssh -L 9000:127.0.0.1:9000 server`.
 - Use long random tokens (`openssl rand -hex 32`) and rotate them by editing `proxy.json`; no restart needed.
+
+## Releases
+
+Prebuilt binaries for Linux, macOS and Windows (amd64/arm64) are on the [Releases](https://github.com/skpjr001/fluid-agent/releases) page, with `checksums.txt`. To cut a release, push a tag:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`fluid-agent -version` prints the version a binary was built from.
