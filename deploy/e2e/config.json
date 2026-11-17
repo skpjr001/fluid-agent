@@ -1,0 +1,11 @@
+{
+  "$schema": "../../schema/config.schema.json",
+  "proxy_addr": ":8080",
+  "webhook_addr": ":8081",
+  "admin_addr": ":9000",
+  "admin_base_path": "/console",
+  "webhook_base_path": "/hooks-gw",
+  "dynamic_dir": "/app/dynamic",
+  "trusted_proxies": ["172.31.0.0/24"],
+  "database": {"path": "/app/data/e2e.db", "retention_days": 1, "log_level": "info", "store_event_bodies": true}
+}

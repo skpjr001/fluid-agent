@@ -70,7 +70,7 @@ func (a *Admin) Handler() http.Handler {
 	route("GET /api/status", false, a.status)
 	route("POST /api/reload", true, a.reload)
 	route("GET /metrics", false, a.metrics)
-	route("GET /api/schema/{name}", false, a.schema)
+	api.HandleFunc("GET /api/schema/{name}", a.schema) // public: the schemas are published anyway
 
 	route("GET /api/proxy", false, a.getProxy)
 	route("PUT /api/proxy", true, a.putProxy)
@@ -96,7 +96,7 @@ func (a *Admin) Handler() http.Handler {
 	root.Handle("/api/", api)
 	root.Handle("/metrics", api)
 	ui, _ := fs.Sub(uiFS, "ui")
-	root.Handle("/", uiHandler(ui))
+	root.Handle("/", a.uiHandler(ui))
 	return root
 }
 
@@ -161,6 +161,8 @@ func (a *Admin) status(w http.ResponseWriter, r *http.Request) {
 		"logs_dropped":   a.app.sink.Dropped(),
 		"active_tunnels": a.app.proxy.tunnels.Load(),
 		"tracing":        a.app.tracing,
+		"environment":    map[string]any{"container": a.app.env.Container, "systemd": a.app.env.Systemd},
+		"deployment":     orEmpty(a.app.notes),
 	})
 }
 

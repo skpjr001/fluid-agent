@@ -1,0 +1,3 @@
+{"$schema": "../../../schema/proxy.schema.json",
+ "clients": [{"name": "e2e", "token": "e2e-client-token-0123456789"}],
+ "allowed_hosts": ["whoami"], "allowed_ports": [80], "private_allowlist": ["172.31.0.0/24"]}

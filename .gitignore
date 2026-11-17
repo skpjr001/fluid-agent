@@ -14,3 +14,6 @@
 
 # Local sample archives
 samples/
+
+# e2e test certificates (generated)
+deploy/e2e/.certs/

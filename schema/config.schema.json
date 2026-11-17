@@ -25,6 +25,33 @@
       "default": "127.0.0.1:9000",
       "description": "Admin API and UI listener; keep on localhost."
     },
+    "proxy_base_path": {
+      "description": "Path prefix for POST /forward and /healthz on the proxy listener, e.g. \"/relay\". Requests work with or without the prefix, so the reverse proxy may strip it or not.",
+      "type": "string",
+      "pattern": "^((/[A-Za-z0-9._~-]+)+/?|/?)$"
+    },
+    "webhook_base_path": {
+      "description": "Path prefix for webhooks, ingest and health endpoints, e.g. \"/hooks-gw\". Requests work with or without the prefix, so the reverse proxy may strip it or not.",
+      "type": "string",
+      "pattern": "^((/[A-Za-z0-9._~-]+)+/?|/?)$"
+    },
+    "admin_base_path": {
+      "description": "Path prefix for the console and API, e.g. \"/fluid-admin\". Empty: taken from X-Forwarded-Prefix sent by a trusted proxy. Requests work with or without the prefix, so the reverse proxy may strip it or not.",
+      "type": "string",
+      "pattern": "^((/[A-Za-z0-9._~-]+)+/?|/?)$"
+    },
+    "proxy_tls": {
+      "$ref": "#/$defs/tls",
+      "description": "Serve the proxy over HTTPS (clients use https:// proxy URLs). HTTP/1.1 only."
+    },
+    "webhook_tls": {
+      "$ref": "#/$defs/tls",
+      "description": "Serve webhooks and ingest over HTTPS without a reverse proxy."
+    },
+    "admin_tls": {
+      "$ref": "#/$defs/tls",
+      "description": "Serve the console and API over HTTPS."
+    },
     "dynamic_dir": {
       "type": "string",
       "default": "./dynamic",
@@ -189,6 +216,104 @@
         }
       },
       "description": "Token-bucket rate limit per source IP."
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "HTTPS for a listener: certificate files (reloaded when they change) or automatic ACME certificates.",
+      "properties": {
+        "cert_file": {
+          "description": "PEM certificate chain.",
+          "type": "string"
+        },
+        "key_file": {
+          "description": "PEM private key.",
+          "type": "string"
+        },
+        "acme": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Automatic certificates (Let's Encrypt by default). TLS-ALPN-01 needs the listener on :443; otherwise set http_challenge_addr.",
+          "properties": {
+            "domains": {
+              "description": "Hostnames to obtain certificates for.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            },
+            "email": {
+              "description": "Contact email for the CA account.",
+              "type": "string"
+            },
+            "cache_dir": {
+              "description": "Where certificates and the account key are kept. Default: <database dir>/acme.",
+              "type": "string"
+            },
+            "directory_url": {
+              "description": "ACME directory, e.g. Let's Encrypt staging. Default: Let's Encrypt production.",
+              "type": "string"
+            },
+            "ca_file": {
+              "description": "PEM roots to trust for the ACME directory (private ACME servers such as step-ca or Pebble).",
+              "type": "string"
+            },
+            "http_challenge_addr": {
+              "description": "Listener for HTTP-01 challenges, e.g. \":80\"; it also redirects other HTTP requests to HTTPS.",
+              "type": "string"
+            },
+            "accept_tos": {
+              "description": "Must be true: you accept the certificate authority's terms of service.",
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "domains",
+            "accept_tos"
+          ]
+        },
+        "min_version": {
+          "description": "Minimum TLS version.",
+          "enum": [
+            "1.2",
+            "1.3"
+          ]
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "cert_file",
+            "key_file"
+          ],
+          "not": {
+            "required": [
+              "acme"
+            ]
+          }
+        },
+        {
+          "required": [
+            "acme"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "cert_file"
+                ]
+              },
+              {
+                "required": [
+                  "key_file"
+                ]
+              }
+            ]
+          }
+        }
+      ]
     }
   }
 }

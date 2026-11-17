@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io/fs"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -211,9 +215,36 @@ func (a *Admin) stream(w http.ResponseWriter, r *http.Request) {
 
 // ---------- UI ----------
 
+// uiBase returns the external path prefix of the console: admin_base_path,
+// or X-Forwarded-Prefix from a trusted reverse proxy that stripped it.
+func (a *Admin) uiBase(r *http.Request) string {
+	if a.app.cfg.AdminBasePath != "" {
+		return a.app.cfg.AdminBasePath
+	}
+	fp := r.Header.Get("X-Forwarded-Prefix")
+	if fp == "" || len(a.app.cfg.trusted) == 0 {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return ""
+	}
+	peer, err := netip.ParseAddr(host)
+	if err != nil || !prefixesContain(a.app.cfg.trusted, peer) {
+		return ""
+	}
+	if b, err := normalizeBasePath(fp); err == nil {
+		return b
+	}
+	return ""
+}
+
 // uiHandler serves the embedded single-page UI with strict security headers.
-func uiHandler(ui fs.FS) http.Handler {
+// index.html gets the external base path so links and API calls work when
+// the console is mounted under a path.
+func (a *Admin) uiHandler(ui fs.FS) http.Handler {
 	files := http.FileServer(http.FS(ui))
+	index, _ := fs.ReadFile(ui, "index.html")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
@@ -224,9 +255,14 @@ func uiHandler(ui fs.FS) http.Handler {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if _, err := fs.Stat(ui, strings.TrimPrefix(r.URL.Path, "/")); r.URL.Path != "/" && err != nil {
-			r.URL.Path = "/" // client-side routes fall back to index.html
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		if fi, err := fs.Stat(ui, name); name != "" && name != "index.html" && err == nil && !fi.IsDir() {
+			files.ServeHTTP(w, r)
+			return
 		}
-		files.ServeHTTP(w, r)
+		// "/" and client-side routes get index.html with the base path filled in
+		base := html.EscapeString(a.uiBase(r))
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		w.Write(bytes.ReplaceAll(index, []byte("{{BASE}}"), []byte(base)))
 	})
 }

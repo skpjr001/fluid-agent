@@ -6,6 +6,16 @@
 
 const $app = document.getElementById("app");
 const MASK = "********";
+// External path prefix (e.g. "/fluid-admin"), filled in by the server.
+const BASE = (() => {
+  const b = document.querySelector('meta[name="fluid-base"]')?.content || "";
+  return b.includes("{{") ? "" : b.replace(/\/$/, "");
+})();
+// appPath is the route inside the app, without the base prefix.
+function appPath() {
+  const p = location.pathname;
+  return BASE && (p === BASE || p.startsWith(BASE + "/")) ? p.slice(BASE.length) || "/" : p;
+}
 
 function h(tag, attrs, ...children) {
   const el = document.createElement(tag);
@@ -140,7 +150,7 @@ async function api(method, path, body) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
   }
-  const resp = await fetch(path, opts);
+  const resp = await fetch(BASE + path, opts);
   if (resp.status === 401) { logout(); throw new ApiError(401, "Session expired"); }
   if (resp.status === 204) return null;
   const text = await resp.text();
@@ -169,7 +179,7 @@ async function startLive() {
   state.stream = ctrl;
   setLiveIndicator(true);
   try {
-    const resp = await fetch("/api/stream?topics=logs,events,deliveries", {
+    const resp = await fetch(BASE + "/api/stream?topics=logs,events,deliveries", {
       headers: { Authorization: "Bearer " + state.token }, signal: ctrl.signal });
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -253,8 +263,8 @@ const ROUTES = [
 ];
 
 function navigate(path, replace) {
-  if (replace) history.replaceState(null, "", path);
-  else history.pushState(null, "", path);
+  if (replace) history.replaceState(null, "", BASE + path);
+  else history.pushState(null, "", BASE + path);
   route();
 }
 window.addEventListener("popstate", () => route());
@@ -262,7 +272,7 @@ document.addEventListener("click", (e) => {
   const a = e.target.closest("a[data-link]");
   if (!a || e.metaKey || e.ctrlKey || e.shiftKey) return;
   e.preventDefault();
-  navigate(a.getAttribute("href"));
+  navigate(a.dataset.link);
 });
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
@@ -271,7 +281,7 @@ document.addEventListener("keydown", (e) => {
   }
 });
 
-function link(path, ...children) { return h("a", { href: path, "data-link": true }, ...children); }
+function link(path, ...children) { return h("a", { href: BASE + path, "data-link": path }, ...children); }
 
 function renderShell() {
   const role = state.me.role;
@@ -306,9 +316,9 @@ async function route() {
   if (!state.me) return;
   closeDetail();
   document.getElementById("shell")?.classList.remove("nav-open");
-  const path = location.pathname;
+  const path = appPath();
   for (const a of document.querySelectorAll(".nav a")) {
-    const p = a.getAttribute("href");
+    const p = a.dataset.link;
     a.classList.toggle("active", p === "/" ? path === "/" : path.startsWith(p));
   }
   const match = ROUTES.find(([re]) => re.test(path));
@@ -1015,7 +1025,7 @@ function editResource(res, existing) {
     if (t === "json") {
       jsonArea.value = JSON.stringify(prune(obj) || {}, null, 2);
       fill(body, jsonArea, h("div", { class: "help" },
-        "Full object as stored in the file. Validated against ", link("/api/schema/" + (res === RES.ingest ? "ingest" : res === RES.profiles ? "profile" : "webhook") + ".schema.json", "the JSON Schema"), " on save."));
+        "Full object as stored in the file. Validated against ", h("a", { href: BASE + "/api/schema/" + (res === RES.ingest ? "ingest" : res === RES.profiles ? "profile" : "webhook") + ".schema.json", target: "_blank", rel: "noopener" }, "the JSON Schema"), " on save."));
     } else {
       if (tab === "json") {
         try { obj = JSON.parse(jsonArea.value || "{}"); } catch (e) { showErr("JSON: " + e.message); return; }
@@ -1161,6 +1171,13 @@ async function pageSystem() {
         ["Tracing", st.tracing ? lozenge("OTLP on", "success") : lozenge("off")], ["Active tunnels", String(st.active_tunnels)],
         ["Deliveries", Object.entries(st.deliveries).map(([k, v]) => k + " " + v).join(" · ")],
         ["Signed in as", state.me.name + " (" + state.me.role + ")"]]))),
+    h("div", { class: "panel notes" }, h("h2", {}, "Deployment notes"),
+      h("p", { class: "help" }, "Checked at startup for this way of running the agent (" +
+        (st.environment.container ? st.environment.container + " container" : st.environment.systemd ? "host, systemd" : "host") + ")."),
+      st.deployment.length ? h("ul", { class: "timeline" }, ["error", "warn", "info"].flatMap((lv) =>
+        st.deployment.filter((d) => d.level === lv).map((d) => h("li", {},
+          lozenge(d.level, d.level === "info" ? "info" : "danger" === STATUS_KIND[d.level] ? "danger" : "warn"),
+          h("div", {}, d.message), h("span", { class: "mono muted" }, d.topic))))) : h("div", { class: "muted" }, "Nothing to report.")),
     isEditor() ? h("div", { class: "toolbar" }, h("button", { class: "btn", onclick: async () => {
       try { const r = await api("POST", "/api/reload"); toast(Object.keys(r.errors || {}).length ? "Reloaded with errors" : "Reloaded"); route(); }
       catch (e) { toast(e.message, true); }

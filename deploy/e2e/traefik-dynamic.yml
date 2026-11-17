@@ -1,0 +1,17 @@
+# Same routing as deploy/traefik/compose.yml labels, as a file provider, on plain HTTP.
+http:
+  routers:
+    hooks:      { rule: "Host(`hooks.test`)", entryPoints: [web], service: hooks }
+    hooksgw:    { rule: "Host(`example.test`) && PathPrefix(`/hooks-gw`)", entryPoints: [web], service: hooks, middlewares: [hooksgw-strip] }
+    console:    { rule: "Host(`example.test`) && PathPrefix(`/console`)", entryPoints: [web], service: console, middlewares: [console-strip] }
+  middlewares:
+    console-strip: { stripPrefix: { prefixes: ["/console"] } }
+    hooksgw-strip: { stripPrefix: { prefixes: ["/hooks-gw"] } }
+  services:
+    hooks:   { loadBalancer: { servers: [{ url: "http://agent:8081" }] } }
+    console: { loadBalancer: { servers: [{ url: "http://agent:9000" }] } }
+tcp:
+  routers:
+    fwd: { rule: "HostSNI(`*`)", entryPoints: [proxy], service: fwd }
+  services:
+    fwd: { loadBalancer: { servers: [{ address: "agent:8080" }] } }

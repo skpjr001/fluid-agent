@@ -1,0 +1,23 @@
+# Caddy in front of fluid-agent (automatic HTTPS).
+# fluid-agent config.json: "trusted_proxies": ["127.0.0.1"]
+# Caddy's core cannot pass CONNECT through; expose the forward proxy port
+# directly (firewalled) or use nginx stream / Traefik TCP for it.
+
+hooks.example.com {
+	reverse_proxy 127.0.0.1:8081 # webhooks + ingest at the root
+}
+
+example.com {
+	# console under /console, prefix stripped by handle_path
+	handle_path /console/* {
+		@vpn remote_ip 10.0.0.0/8
+		handle @vpn {
+			reverse_proxy 127.0.0.1:9000 {
+				header_up X-Forwarded-Prefix /console
+				flush_interval -1 # live updates (SSE)
+			}
+		}
+		respond 403
+	}
+	redir /console /console/
+}

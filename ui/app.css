@@ -267,3 +267,6 @@ legend { font-size: 12px; font-weight: 700; color: var(--text-subtle); padding: 
   .board { grid-template-columns: repeat(5, 240px); }
 }
 @media (min-width: 901px) { .menu-btn { display: none !important; } }
+
+.panel.notes { margin-top: 16px; }
+.panel.notes .timeline li { grid-template-columns: 56px 1fr auto; align-items: start; }

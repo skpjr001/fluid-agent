@@ -39,6 +39,9 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 CapabilityBoundingSet=
+# Built-in TLS on :443/:80 (webhook_tls / acme.http_challenge_addr)? Replace the line above with:
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
 SystemCallArchitectures=native
 UMask=0027
 

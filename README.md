@@ -21,7 +21,15 @@ fluid-agent                              # serve
 
 Open the console with an SSH tunnel: `ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>, and sign in with a token from `dynamic/admin.json`.
 
-Docker / Traefik: `cp config.docker.json config.json`, copy `examples/dynamic` to `./dynamic`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`. systemd and nginx examples are in [`deploy/`](deploy/).
+Docker / Traefik: `cp config.docker.json config.json`, copy `examples/dynamic` to `./dynamic`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`.
+
+## Where it can run
+
+On a host (systemd) or in a container; directly with built-in HTTPS or behind nginx, Traefik or Caddy; on a root domain, a subdomain or a path. See **[deploy/README.md](deploy/README.md)** for the full matrix and ready-made configs, all covered by an end-to-end test behind the real proxies.
+
+* `webhook_base_path`, `admin_base_path`, `proxy_base_path` mount a listener under a path; requests work whether or not the reverse proxy strips the prefix. The console also honours `X-Forwarded-Prefix` from a trusted proxy.
+* `webhook_tls`, `admin_tls`, `proxy_tls` serve HTTPS from certificate files (reloaded on renewal) or automatic ACME/Let's Encrypt certificates. `proxy_tls` turns the forward proxy into an `https://` proxy.
+* The HTTP/CONNECT forward proxy cannot go through an HTTP reverse proxy; expose it directly (firewalled), use `proxy_tls`, or TCP passthrough (nginx `stream`, Traefik TCP router).
 
 ## Configuration: the file provider
 
@@ -148,6 +156,7 @@ Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenT
 ```bash
 go test -race ./...
 node --check ui/app.js
+./deploy/e2e/test.sh            # behind real nginx, Traefik and Caddy (Docker or Podman)
 go run . check -config config.example.json
 ```
 

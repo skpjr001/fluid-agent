@@ -89,7 +89,11 @@ func NewForwardProxy(app *App) *ForwardProxy {
 
 func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect && !r.URL.IsAbs() {
-		switch r.URL.Path {
+		path := r.URL.Path
+		if b := fp.app.cfg.ProxyBasePath; b != "" && (path == b || strings.HasPrefix(path, b+"/")) {
+			path = strings.TrimPrefix(path, b)
+		}
+		switch path {
 		case "/forward", "/api/v1/forward":
 			fp.app.forward.ServeHTTP(w, r)
 		case "/healthz":

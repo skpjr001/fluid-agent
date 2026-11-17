@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version: stable
+          go-version-file: go.mod
           cache: false # no dependencies (no go.sum)
 
       - name: Check formatting
@@ -46,3 +46,13 @@ jobs:
 
       - name: Docker build
         run: docker build -t fluid-agent:ci .
+
+  e2e:
+    # fluid-agent behind real nginx, Traefik and Caddy: subdomain, path with
+    # and without prefix stripping, console/API/SSE under a path, forward
+    # proxy via TCP passthrough, and the real sender address through each proxy.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: End-to-end behind reverse proxies
+        run: ./deploy/e2e/test.sh

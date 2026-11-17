@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"embed"
 	"errors"
 	"flag"
@@ -11,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +45,8 @@ type App struct {
 	admin   *Admin
 	started time.Time
 	tracing bool
+	env     hostEnv
+	notes   []DeployNote
 }
 
 const usage = `fluid-agent — forward proxy, webhook relay and callback ingest for IP-allowlisted servers
@@ -183,9 +187,9 @@ func (app *App) Serve(ctx context.Context) error {
 		return fmt.Errorf("telemetry: %w", err)
 	}
 	app.tracing = cfg.Telemetry.OTLPEndpoint != "" || os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT") != ""
-	if len(app.admin.tokens()) == 0 {
-		slog.Warn("no admin tokens: add <dynamic_dir>/admin.json or set PROXY_ADMIN_TOKEN to use the API and UI", "kind", "config")
-	}
+	app.env = detectEnv()
+	app.notes = deploymentNotes(cfg, app.store.snap.Load(), app.env, len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16, time.Now())
+	logDeploymentNotes(app.notes)
 
 	bg, cancelBG := context.WithCancel(context.Background())
 	var bgWG sync.WaitGroup
@@ -195,29 +199,19 @@ func (app *App) Serve(ctx context.Context) error {
 	go func() { defer bgWG.Done(); app.outbox.Run(bg) }()
 	go func() { defer bgWG.Done(); app.housekeeping(bg) }()
 
-	servers := []struct {
-		name string
-		srv  *http.Server
-	}{
-		{"proxy", &http.Server{Addr: cfg.ProxyAddr, Handler: app.proxy, ReadHeaderTimeout: 10 * time.Second}},
-		{"webhook", &http.Server{Addr: cfg.WebhookAddr, Handler: app.inbound.Handler(), ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second}},
-		{"admin", &http.Server{Addr: cfg.AdminAddr, Handler: app.admin.Handler(), ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}},
+	running, err := app.openListeners()
+	if err != nil {
+		cancelBG()
+		return err
 	}
-	errc := make(chan error, len(servers))
-	for _, s := range servers {
-		ln, err := net.Listen("tcp", s.srv.Addr)
-		if err != nil {
-			cancelBG()
-			return fmt.Errorf("%s listener: %w", s.name, err)
-		}
-		slog.Info("listening", "kind", "system", "server", s.name, "addr", ln.Addr().String())
-		go func(srv *http.Server, ln net.Listener) {
-			if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				errc <- err
+	errc := make(chan error, len(running))
+	for _, rs := range running {
+		slog.Info("listening", "kind", "system", "server", rs.name, "addr", rs.ln.Addr().String(), "scheme", rs.scheme)
+		go func(rs runningServer) {
+			if err := rs.srv.Serve(rs.ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errc <- fmt.Errorf("%s: %w", rs.name, err)
 			}
-		}(s.srv, ln)
+		}(rs)
 	}
 	slog.Info("fluid-agent started", "kind", "system", "version", version)
 
@@ -229,8 +223,8 @@ func (app *App) Serve(ctx context.Context) error {
 	slog.Info("shutting down", "kind", "system")
 	sctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	for _, s := range servers {
-		s.srv.Shutdown(sctx)
+	for _, rs := range running {
+		rs.srv.Shutdown(sctx)
 	}
 	close(stopWatch)
 	cancelBG()
@@ -275,12 +269,21 @@ func cmdCheck(args []string, out *os.File) error {
 	cfgPath := fs.String("config", "config.json", "static config file")
 	fs.Parse(args)
 	problems := checkConfig(*cfgPath)
-	if len(problems) == 0 {
-		fmt.Fprintln(out, "OK: all config files are valid")
-		return nil
-	}
 	for _, p := range problems {
 		fmt.Fprintln(out, p)
+	}
+	if cfg, err := loadStatic(*cfgPath); err == nil {
+		if _, err := os.Stat(cfg.DynamicDir); err == nil {
+			ns := deploymentNotes(cfg, loadDir(cfg.DynamicDir, nil), detectEnv(), len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16, time.Now())
+			fmt.Fprintln(out, "\nDeployment notes:")
+			for _, n := range ns {
+				fmt.Fprintf(out, "  %-5s [%s] %s\n", strings.ToUpper(n.Level), n.Topic, n.Message)
+			}
+		}
+	}
+	if len(problems) == 0 {
+		fmt.Fprintln(out, "\nOK: all config files are valid")
+		return nil
 	}
 	return fmt.Errorf("%d invalid file(s)", len(problems))
 }
@@ -333,4 +336,80 @@ func cmdHealthcheck(args []string) error {
 		return fmt.Errorf("%s answered %s", target, resp.Status)
 	}
 	return nil
+}
+
+// runningServer is a bound listener with the server that will serve it.
+type runningServer struct {
+	name   string
+	scheme string
+	srv    *http.Server
+	ln     net.Listener
+}
+
+// Handlers with base paths applied, as served (also used by tests).
+func (app *App) webhookHandler() http.Handler {
+	return stripBasePath(app.cfg.WebhookBasePath, app.inbound.Handler())
+}
+
+func (app *App) adminHandler() http.Handler {
+	return stripBasePath(app.cfg.AdminBasePath, app.admin.Handler())
+}
+
+// openListeners binds every listener (with TLS where configured) plus any
+// ACME HTTP-01 challenge listeners. Nothing is served until Serve runs them.
+func (app *App) openListeners() ([]runningServer, error) {
+	cfg := app.cfg
+	acmeCache := filepath.Join(filepath.Dir(cfg.Database.Path), "acme")
+	specs := []struct {
+		name string
+		srv  *http.Server
+		tls  *TLSConfig
+		h1   bool
+	}{
+		// The proxy strips its base path itself: absolute-URL proxy requests
+		// carry the destination's path, which must never be rewritten.
+		{"proxy", &http.Server{Addr: cfg.ProxyAddr, Handler: app.proxy, ReadHeaderTimeout: 10 * time.Second}, cfg.ProxyTLS, true},
+		{"webhook", &http.Server{Addr: cfg.WebhookAddr, Handler: app.webhookHandler(), ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout: 60 * time.Second, IdleTimeout: 120 * time.Second}, cfg.WebhookTLS, false},
+		{"admin", &http.Server{Addr: cfg.AdminAddr, Handler: app.adminHandler(), ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second}, cfg.AdminTLS, false},
+	}
+	var out []runningServer
+	fail := func(err error) ([]runningServer, error) {
+		for _, rs := range out {
+			rs.ln.Close()
+		}
+		return nil, err
+	}
+	for _, s := range specs {
+		ts, err := buildTLS(s.tls, acmeCache, s.h1)
+		if err != nil {
+			return fail(fmt.Errorf("%s TLS: %w", s.name, err))
+		}
+		scheme := "http"
+		if ts != nil {
+			scheme = "https"
+			s.srv.TLSConfig = ts.config
+			if s.h1 { // keep the proxy on HTTP/1.1 so CONNECT can hijack the connection
+				s.srv.TLSNextProto = map[string]func(*http.Server, *tls.Conn, http.Handler){}
+			}
+		}
+		ln, err := listen(s.srv.Addr, ts)
+		if err != nil {
+			if errors.Is(err, syscall.EACCES) {
+				err = fmt.Errorf("%w (ports below 1024 need CAP_NET_BIND_SERVICE or root; see deploy/systemd)", err)
+			}
+			return fail(fmt.Errorf("%s listener: %w", s.name, err))
+		}
+		out = append(out, runningServer{s.name, scheme, s.srv, ln})
+		if ts != nil && ts.httpHandler != nil {
+			cl, err := net.Listen("tcp", ts.httpAddr)
+			if err != nil {
+				return fail(fmt.Errorf("%s ACME challenge listener: %w", s.name, err))
+			}
+			ch := &http.Server{Handler: ts.httpHandler, ReadHeaderTimeout: 10 * time.Second}
+			out = append(out, runningServer{s.name + "-acme-http", "http", ch, cl})
+		}
+	}
+	return out, nil
 }

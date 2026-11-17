@@ -1,0 +1,18 @@
+# Same routing as deploy/caddy/Caddyfile, on plain HTTP for testing.
+{
+	auto_https off
+}
+http://hooks.test {
+	reverse_proxy agent:8081
+}
+http://example.test {
+	handle_path /console/* {
+		reverse_proxy agent:9000 {
+			header_up X-Forwarded-Prefix /console
+			flush_interval -1
+		}
+	}
+	handle_path /hooks-gw/* {
+		reverse_proxy agent:8081
+	}
+}

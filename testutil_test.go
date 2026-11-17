@@ -66,8 +66,8 @@ func newTestApp(t *testing.T, mutate func(*StaticConfig)) *testApp {
 	done := make(chan struct{})
 	go func() { app.outbox.Run(ctx); close(done) }()
 	ta.proxy = httptest.NewServer(app.proxy)
-	ta.inbound = httptest.NewServer(app.inbound.Handler())
-	ta.admin = httptest.NewServer(app.admin.Handler())
+	ta.inbound = httptest.NewServer(app.webhookHandler())
+	ta.admin = httptest.NewServer(app.adminHandler())
 	t.Cleanup(func() {
 		ta.proxy.Close()
 		ta.inbound.Close()

@@ -20,16 +20,22 @@ const SchemaBase = "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/
 // Everything that changes at runtime lives in DynamicDir (the file provider).
 type StaticConfig struct {
 	Schema            string          `json:"$schema,omitempty"`
-	ProxyAddr         string          `json:"proxy_addr"`          // forward proxy (HTTP + CONNECT) and JSON /forward
-	WebhookAddr       string          `json:"webhook_addr"`        // public webhook + callback ingress
-	AdminAddr         string          `json:"admin_addr"`          // admin API + UI; keep on 127.0.0.1
-	DynamicDir        string          `json:"dynamic_dir"`         // hot-reloaded JSON files
-	ReloadInterval    Duration        `json:"reload_interval"`     // how often to check DynamicDir for changes
-	MaxConns          int             `json:"max_conns"`           // concurrent proxy requests/tunnels
-	MaxBodyBytes      int64           `json:"max_body_bytes"`      // inbound webhook/forward body cap
-	TrustedProxies    []string        `json:"trusted_proxies"`     // CIDRs whose X-Forwarded-For is believed
-	TunnelIdleTimeout Duration        `json:"tunnel_idle_timeout"` // close CONNECT tunnels idle this long
-	WebhookRateLimit  RateLimit       `json:"webhook_rate_limit"`  // default per-source-IP limit on ingress
+	ProxyAddr         string          `json:"proxy_addr"`            // forward proxy (HTTP + CONNECT) and JSON /forward
+	WebhookAddr       string          `json:"webhook_addr"`          // public webhook + callback ingress
+	AdminAddr         string          `json:"admin_addr"`            // admin API + UI; keep on 127.0.0.1
+	ProxyBasePath     string          `json:"proxy_base_path"`       // path prefix for /forward (e.g. "/relay")
+	WebhookBasePath   string          `json:"webhook_base_path"`     // path prefix for webhooks/ingest/health
+	AdminBasePath     string          `json:"admin_base_path"`       // path prefix for the UI and API
+	ProxyTLS          *TLSConfig      `json:"proxy_tls,omitempty"`   // HTTPS proxy (clients use https:// proxy URLs)
+	WebhookTLS        *TLSConfig      `json:"webhook_tls,omitempty"` // serve webhooks over HTTPS without a reverse proxy
+	AdminTLS          *TLSConfig      `json:"admin_tls,omitempty"`   // serve the UI/API over HTTPS
+	DynamicDir        string          `json:"dynamic_dir"`           // hot-reloaded JSON files
+	ReloadInterval    Duration        `json:"reload_interval"`       // how often to check DynamicDir for changes
+	MaxConns          int             `json:"max_conns"`             // concurrent proxy requests/tunnels
+	MaxBodyBytes      int64           `json:"max_body_bytes"`        // inbound webhook/forward body cap
+	TrustedProxies    []string        `json:"trusted_proxies"`       // CIDRs whose X-Forwarded-For is believed
+	TunnelIdleTimeout Duration        `json:"tunnel_idle_timeout"`   // close CONNECT tunnels idle this long
+	WebhookRateLimit  RateLimit       `json:"webhook_rate_limit"`    // default per-source-IP limit on ingress
 	Forward           ForwardSettings `json:"forward"`
 	Database          DatabaseConfig  `json:"database"`
 	Outbox            OutboxConfig    `json:"outbox"`
@@ -161,6 +167,34 @@ func hintLegacy(err error) error {
 
 func (c *StaticConfig) validate() error {
 	var errs []error
+	for _, bp := range []struct {
+		name string
+		p    *string
+	}{{"proxy_base_path", &c.ProxyBasePath}, {"webhook_base_path", &c.WebhookBasePath}, {"admin_base_path", &c.AdminBasePath}} {
+		n, err := normalizeBasePath(*bp.p)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", bp.name, err))
+		}
+		*bp.p = n
+	}
+	for name, t := range map[string]*TLSConfig{"proxy_tls": c.ProxyTLS, "webhook_tls": c.WebhookTLS, "admin_tls": c.AdminTLS} {
+		if err := t.validate(); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", name, err))
+		}
+	}
+	challenge := map[string]string{}
+	for _, l := range []struct {
+		name string
+		t    *TLSConfig
+	}{{"proxy_tls", c.ProxyTLS}, {"webhook_tls", c.WebhookTLS}, {"admin_tls", c.AdminTLS}} {
+		if l.t == nil || l.t.ACME == nil || l.t.ACME.HTTPChallengeAddr == "" {
+			continue
+		}
+		if other, dup := challenge[l.t.ACME.HTTPChallengeAddr]; dup {
+			errs = append(errs, fmt.Errorf("%s and %s use the same acme.http_challenge_addr; set it on one listener only", other, l.name))
+		}
+		challenge[l.t.ACME.HTTPChallengeAddr] = l.name
+	}
 	if c.ReloadInterval <= 0 {
 		errs = append(errs, errors.New("reload_interval must be > 0"))
 	}
