@@ -130,7 +130,7 @@ func deploymentNotes(cfg *StaticConfig, snap *snapshot, env hostEnv, envAdminTok
 	if env.Container == "" && env.EUID == 0 {
 		n.add("warn", "runtime", "running as root: use a dedicated user (see deploy/systemd/fluid-agent.service)")
 	}
-	if !dirWritable(cfg.DynamicDir) {
+	if fileExists(cfg.DynamicDir) && !dirWritable(cfg.DynamicDir) {
 		n.add("warn", "config", "dynamic config dir %s is read-only: editors cannot save changes from the console or API; edit the files directly", cfg.DynamicDir)
 	}
 

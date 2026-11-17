@@ -27,7 +27,7 @@ $COMPOSE up -d --quiet-pull pebble >/dev/null 2>&1
 $COMPOSE cp pebble:/test/certs/pebble.minica.pem .certs/pebble.minica.pem >/dev/null
 chmod 644 .certs/pebble.minica.pem
 $COMPOSE up -d --build --quiet-pull >/dev/null 2>&1 || { $COMPOSE up -d --build; exit 1; }
-trap '[[ $fail != 0 ]] && $COMPOSE logs --tail 40 agent agent-tls agent-acme-alpn agent-acme-http pebble; $COMPOSE down -v >/dev/null 2>&1; rm -rf .certs' EXIT
+trap '[[ $fail != 0 ]] && $COMPOSE logs --tail 40 agent agent-fresh agent-tls agent-acme-alpn agent-acme-http pebble; $COMPOSE down -v >/dev/null 2>&1; rm -rf .certs' EXIT
 for i in $(seq 1 60); do curl -fs -H 'Host: hooks.test' http://127.0.0.1:28080/readyz >/dev/null && break; sleep 1; done
 
 for proxy in nginx:28080:28088 traefik:38080:38088 caddy:48080:; do
@@ -75,6 +75,22 @@ for host in acme-alpn.test:443 acme-http.test:8443; do
   check "$name: certificate issued and served" 'Pebble Intermediate' "$out"
 done
 check "acme-http.test: HTTP redirects to HTTPS" 'Location: https://acme-http.test' "$($T -s -D - -o /dev/null http://acme-http.test/hooks/w)"
+
+echo "== first run without any config (agent-fresh)"
+F="$COMPOSE exec -T agent-fresh /fluid-agent"
+for i in $(seq 1 15); do $F healthcheck -config /app/config.json >/dev/null 2>&1 && break; sleep 1; done
+check "fresh: live on built-in defaults" 'ok' "$($COMPOSE exec -T tester curl -s http://agent-fresh:8081/livez)"
+flogs=$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"topic":"bootstrap"')
+check "fresh: config.json created" 'created static config /app/config.json' "$flogs"
+check "fresh: proxy.json created" 'created proxy config /app/dynamic/proxy.json' "$flogs"
+check "fresh: admin.json + token location logged" 'generated editor token named \"admin\"' "$flogs"
+check "fresh: sub-directories created" 'created dynamic config directory /app/dynamic/webhooks' "$flogs"
+check "fresh: token value never logged" 'not-logged' "$($COMPOSE logs agent-fresh 2>/dev/null | grep -qE '[0-9a-f]{64}' && echo leaked || echo not-logged)"
+check "fresh: created files are valid" 'OK: all config files are valid' "$($F check -config /app/config.json 2>&1)"
+check "fresh: init on a second run creates nothing" 'nothing to create' "$($F init -config /app/config.json 2>&1)"
+$COMPOSE restart agent-fresh >/dev/null 2>&1
+for i in $(seq 1 15); do $F healthcheck -config /app/config.json >/dev/null 2>&1 && break; sleep 1; done
+check "fresh: restart keeps files (no bootstrap again)" 'none' "$($COMPOSE logs --no-log-prefix --since 20s agent-fresh 2>/dev/null | grep -q '"topic":"bootstrap"' && echo created-again || echo none)"
 
 echo "== deployment notes logged for each setup"
 logs() { $COMPOSE logs --no-log-prefix "$1" 2>/dev/null | grep '"kind":"deploy"'; }

@@ -15,12 +15,26 @@ fluid-agent runs as a plain binary (systemd), in a container, with or without a 
 * **The forward proxy** speaks HTTP proxy protocol (`CONNECT`, absolute URLs), which HTTP reverse proxies cannot route. Expose it directly (firewalled), give it `proxy_tls`, or pass it through as TCP (nginx `stream {}`, Traefik TCP router). Caddy's core has no TCP proxy.
 * **Behind any proxy** set `trusted_proxies` to the proxy's address so `source_cidrs`, rate limits and logs see the real sender. Configure the proxy to *overwrite* `X-Forwarded-For` (`$remote_addr`) where possible.
 
+## First start creates what is missing
+
+Every layout below starts from an empty directory: the agent creates `config.json` (all defaults), `dynamic/` (`webhooks/`, `ingest/`, `profiles/`, deny-by-default `proxy.json`, `admin.json` with a generated editor token unless `PROXY_ADMIN_TOKEN` is set), the database directory and ACME caches, and logs each with `topic: "bootstrap"`. Existing files are never touched. `fluid-agent init` does it without serving (the systemd unit runs it as `ExecStartPre`).
+
+| Where | What you do | What is created |
+|---|---|---|
+| Host | run `fluid-agent` | `./config.json`, `./dynamic/…`, `./data/` |
+| systemd | `useradd fluid`, install the binary and unit | `/var/lib/fluid-agent/{config.json,dynamic/,data/}` (systemd's `StateDirectory` creates the parent) |
+| Container, no mounts / named volumes | `docker run` | `/app/config.json`, `/app/dynamic/…`, `/app/data/` |
+| Container, bind mounts | the mounted *file* must exist on the host (otherwise Docker creates a directory, and the agent says so); a mounted *directory* must be writable by uid 65532 | missing files and sub-directories inside the mounts |
+
+If something cannot be created (read-only mount, wrong owner) it is logged as a warning and the agent runs on built-in defaults.
+
 ## Deployment notes in the logs
 
 At startup the agent inspects how it is running and logs every caveat that applies, as `info`, `warn` or `error` records with `kind: "deploy"` (stored with the other logs, shown on the console's Status page, and printed by `fluid-agent check`):
 
 | Situation | Examples of what is logged |
 |---|---|
+| First start | each directory and file created (`topic: bootstrap`), or a warning when it could not be |
 | Host / systemd / container | where it runs; root on a host (warn); in a container: the host's IP is the egress IP, database or config not on a volume (warn), read-only config mount (warn) |
 | Each listener | `scheme://addr (all interfaces / loopback only), path /base`; privileged ports and `CAP_NET_BIND_SERVICE` |
 | Forward proxy | cannot go behind an HTTP reverse proxy; plain HTTP on all interfaces (warn on a host); `https://` proxy URL guidance with `proxy_tls` |
@@ -57,4 +71,4 @@ At startup the agent inspects how it is running and logs every caveat that appli
 | [`caddy/Caddyfile`](caddy/Caddyfile) | Caddy: subdomain, `handle_path` with `X-Forwarded-Prefix` |
 | [`e2e/`](e2e/) | Runnable test of the same routing behind nginx, Traefik and Caddy (`./deploy/e2e/test.sh`) |
 
-The e2e suite (52 checks) also runs agents with certificate-file TLS on every listener (no reverse proxy), and with ACME against [Pebble](https://github.com/letsencrypt/pebble) using both TLS-ALPN-01 and HTTP-01, and verifies the deployment notes each setup logs. The reverse-proxy variants are the same routing as the production examples on plain HTTP. Run the e2e suite with Docker, or with Podman via `DOCKER_HOST=unix:///run/user/$UID/podman/podman.sock` (or `COMPOSE="podman compose"`).
+The e2e suite also starts an agent with no mounts at all and checks what it creates, and runs agents with certificate-file TLS on every listener (no reverse proxy), and with ACME against [Pebble](https://github.com/letsencrypt/pebble) using both TLS-ALPN-01 and HTTP-01, and verifies the deployment notes each setup logs. The reverse-proxy variants are the same routing as the production examples on plain HTTP. Run the e2e suite with Docker, or with Podman via `DOCKER_HOST=unix:///run/user/$UID/podman/podman.sock` (or `COMPOSE="podman compose"`).

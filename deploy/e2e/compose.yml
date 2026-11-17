@@ -78,6 +78,10 @@ services:
       - ./.certs:/certs:ro
     depends_on: [pebble]
     networks: { e2e: { aliases: [acme-http.test] } }
+  # ---- first run with no mounts: the agent creates its own config ----
+  agent-fresh:
+    build: ../..
+    networks: { e2e: {} }
   tester:                   # runs checks from inside the network
     image: docker.io/curlimages/curl:latest
     command: ["sleep", "3600"]

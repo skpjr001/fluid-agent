@@ -13,15 +13,17 @@ Everything is stored in one SQLite file (logs, events, deliveries) and all confi
 ## Quick start
 
 ```bash
-cp config.example.json config.json
-cp -r examples/dynamic dynamic          # then replace every CHANGE-ME value
-fluid-agent check                        # validate config.json and every dynamic file
-fluid-agent                              # serve
+fluid-agent                              # first run creates config.json, dynamic/ and data/
+cat dynamic/admin.json                   # generated editor token for the console
 ```
+
+On first start the agent creates every directory and config file it needs, never overwriting an existing one: `config.json` with every default spelled out, `dynamic/` with `webhooks/`, `ingest/`, `profiles/`, a deny-by-default `proxy.json` and an `admin.json` holding a generated editor token (or no token when `PROXY_ADMIN_TOKEN` is set), the database directory and ACME caches. Each is logged with `kind: "deploy"` and `topic: "bootstrap"`; the token itself is never logged. `fluid-agent init` does the same without serving and then validates, and anything it cannot create (read-only mount) is a warning while the agent runs on built-in defaults.
+
+To start from examples instead: `cp config.example.json config.json`, `cp -r examples/dynamic dynamic`, replace every CHANGE-ME value, then `fluid-agent check`.
 
 Open the console with an SSH tunnel: `ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>, and sign in with a token from `dynamic/admin.json`.
 
-Docker / Traefik: `cp config.docker.json config.json`, copy `examples/dynamic` to `./dynamic`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`.
+Docker: `docker run` with no mounts works (the agent creates `/app/config.json` and `/app/dynamic`). With Traefik: `cp config.docker.json config.json`, optionally copy `examples/dynamic` to `./dynamic`, put `PROXY_ADMIN_TOKEN=...` in `.env`, set the host in `compose.yml`, then `docker compose up -d`.
 
 ## Where it can run
 
@@ -158,6 +160,7 @@ go test -race ./...
 node --check ui/app.js
 ./deploy/e2e/test.sh            # behind real nginx, Traefik and Caddy (Docker or Podman)
 go run . check -config config.example.json
+go run . init -config /tmp/fa/config.json   # what a first start creates
 ```
 
 ## Releases

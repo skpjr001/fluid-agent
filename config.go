@@ -146,6 +146,9 @@ func loadStatic(path string) (*StaticConfig, error) {
 			return nil, fmt.Errorf("%s: %w", path, hintLegacy(err))
 		}
 	case !os.IsNotExist(err):
+		if fi, serr := os.Stat(path); serr == nil && fi.IsDir() {
+			return nil, fmt.Errorf("%s is a directory, not a file: a container bind mount of a file that did not exist on the host creates a directory; remove it and create the file on the host (e.g. cp config.docker.json config.json), or drop the mount and let the agent create its defaults", path)
+		}
 		return nil, err
 	}
 	if err := c.validate(); err != nil {

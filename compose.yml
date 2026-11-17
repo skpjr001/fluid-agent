@@ -6,9 +6,14 @@ services:
     restart: unless-stopped
     environment:
       PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set in .env}   # bootstrap editor token
+    # Without these mounts the agent creates /app/config.json and /app/dynamic
+    # (proxy.json, admin.json with a generated token, webhooks/ ingest/ profiles/)
+    # itself on first start. A bind-mounted file must exist on the host first,
+    # or Docker creates a directory in its place; a bind-mounted directory must
+    # be writable by uid 65532 for console/API edits (sudo chown 65532 dynamic).
     volumes:
       - ./config.json:/app/config.json:ro   # cp config.docker.json config.json
-      - ./dynamic:/app/dynamic              # cp -r examples/dynamic dynamic, then edit
+      - ./dynamic:/app/dynamic              # missing files and sub-directories are created
       - fluid-data:/app/data                # SQLite: logs, events, deliveries
     ports:
       - "8080:8080"                         # forward proxy + /forward - firewall to your IPs only!

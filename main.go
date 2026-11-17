@@ -53,6 +53,7 @@ const usage = `fluid-agent — forward proxy, webhook relay and callback ingest 
 
 Usage:
   fluid-agent [serve] [-config config.json]   run the agent (default)
+  fluid-agent init    [-config config.json]   create missing directories and config files (serve does this too)
   fluid-agent check   [-config config.json]   validate config.json and every dynamic file
   fluid-agent logs    [flags]                 query the SQLite log store (fluid-agent logs -h)
   fluid-agent healthcheck [-config ...]       exit 0 if the local agent is live (for Docker)
@@ -69,6 +70,8 @@ func main() {
 	switch cmd {
 	case "serve":
 		err = cmdServe(args)
+	case "init":
+		err = cmdInit(args, os.Stdout)
 	case "check":
 		err = cmdCheck(args, os.Stdout)
 	case "logs":
@@ -98,16 +101,19 @@ func cmdServe(args []string) error {
 		fmt.Println(version)
 		return nil
 	}
+	existed := pathPresent(*cfgPath)
 	cfg, err := loadStatic(*cfgPath)
 	if err != nil {
 		return err
 	}
+	created := bootstrap(*cfgPath, cfg, existed, len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	app, err := NewApp(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	logBootstrap(created)
 	return app.Serve(ctx)
 }
 
@@ -273,12 +279,16 @@ func cmdCheck(args []string, out *os.File) error {
 		fmt.Fprintln(out, p)
 	}
 	if cfg, err := loadStatic(*cfgPath); err == nil {
-		if _, err := os.Stat(cfg.DynamicDir); err == nil {
-			ns := deploymentNotes(cfg, loadDir(cfg.DynamicDir, nil), detectEnv(), len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16, time.Now())
-			fmt.Fprintln(out, "\nDeployment notes:")
-			for _, n := range ns {
-				fmt.Fprintf(out, "  %-5s [%s] %s\n", strings.ToUpper(n.Level), n.Topic, n.Message)
-			}
+		if !pathPresent(*cfgPath) {
+			fmt.Fprintf(out, "%s does not exist yet: built-in defaults apply, and it is created on first start (or run fluid-agent init)\n", *cfgPath)
+		}
+		if !pathPresent(cfg.DynamicDir) {
+			fmt.Fprintf(out, "%s does not exist yet: it is created on first start (or run fluid-agent init)\n", cfg.DynamicDir)
+		}
+		ns := deploymentNotes(cfg, loadDir(cfg.DynamicDir, nil), detectEnv(), len(os.Getenv("PROXY_ADMIN_TOKEN")) >= 16, time.Now())
+		fmt.Fprintln(out, "\nDeployment notes:")
+		for _, n := range ns {
+			fmt.Fprintf(out, "  %-5s [%s] %s\n", strings.ToUpper(n.Level), n.Topic, n.Message)
 		}
 	}
 	if len(problems) == 0 {
@@ -295,7 +305,9 @@ func checkConfig(cfgPath string) []string {
 	if err != nil {
 		return []string{err.Error()}
 	}
-	if _, err := os.Stat(cfg.DynamicDir); err != nil {
+	if fi, err := os.Stat(cfg.DynamicDir); err == nil && !fi.IsDir() {
+		return []string{cfg.DynamicDir + ": not a directory"}
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return []string{fmt.Sprintf("%s: %v", cfg.DynamicDir, err)}
 	}
 	snap := loadDir(cfg.DynamicDir, nil)

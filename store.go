@@ -46,10 +46,10 @@ type snapshot struct {
 var dynamicSubdirs = []string{"webhooks", "profiles", "ingest"}
 
 func NewStore(dir string) (*Store, error) {
+	// Missing directories are created by bootstrap; a read-only mount is
+	// fine here (files load, saves fail with a clear error).
 	for _, sub := range dynamicSubdirs {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o750); err != nil {
-			return nil, err
-		}
+		os.MkdirAll(filepath.Join(dir, sub), 0o750)
 	}
 	s := &Store{dir: dir}
 	s.snap.Store(&snapshot{
@@ -350,7 +350,9 @@ func (s *Store) Delete(kind, id string) error {
 	return s.removeFile(filepath.Join(kind, id+".json"))
 }
 
-func writeAtomic(path string, data []byte) error {
+func writeAtomic(path string, data []byte) error { return writeAtomicMode(path, data, 0o640) }
+
+func writeAtomicMode(path string, data []byte, perm os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
@@ -367,7 +369,7 @@ func writeAtomic(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Chmod(tmp.Name(), 0o640); err != nil {
+	if err := os.Chmod(tmp.Name(), perm); err != nil {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)

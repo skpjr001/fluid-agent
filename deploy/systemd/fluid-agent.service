@@ -1,10 +1,14 @@
 # /etc/systemd/system/fluid-agent.service
-#   sudo useradd -r -s /usr/sbin/nologin -d /opt/fluid-agent fluid
-#   sudo install -d -o fluid -g fluid -m 750 /opt/fluid-agent /opt/fluid-agent/dynamic /var/lib/fluid-agent
+#   sudo useradd -r -s /usr/sbin/nologin -d /var/lib/fluid-agent fluid
 #   sudo install -m 755 fluid-agent /usr/local/bin/
-#   config.json: "dynamic_dir": "/opt/fluid-agent/dynamic", "database": {"path": "/var/lib/fluid-agent/fluid-agent.db", ...}
-#   sudo -u fluid fluid-agent check -config /opt/fluid-agent/config.json
 #   sudo systemctl enable --now fluid-agent
+#
+# systemd creates /var/lib/fluid-agent (StateDirectory, owned by fluid) and the
+# agent creates everything inside it on first start:
+#   /var/lib/fluid-agent/config.json      static config with every default spelled out
+#   /var/lib/fluid-agent/dynamic/         proxy.json, admin.json (generated editor token), webhooks/ ingest/ profiles/
+#   /var/lib/fluid-agent/data/            SQLite database (and acme/ certificate cache)
+# Sign in with the token from: sudo cat /var/lib/fluid-agent/dynamic/admin.json
 [Unit]
 Description=fluid-agent relay (forward proxy, webhooks, callback ingest)
 Documentation=https://github.com/skpjr001/fluid-agent
@@ -15,18 +19,21 @@ Wants=network-online.target
 Type=simple
 User=fluid
 Group=fluid
-ExecStartPre=/usr/local/bin/fluid-agent check -config /opt/fluid-agent/config.json
-ExecStart=/usr/local/bin/fluid-agent serve -config /opt/fluid-agent/config.json
-# Optional bootstrap editor token (otherwise use dynamic/admin.json):
-# EnvironmentFile=/opt/fluid-agent/agent.env
+StateDirectory=fluid-agent
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/fluid-agent
+# init creates anything missing and refuses to start on invalid config files.
+ExecStartPre=/usr/local/bin/fluid-agent init -config /var/lib/fluid-agent/config.json
+ExecStart=/usr/local/bin/fluid-agent serve -config /var/lib/fluid-agent/config.json
+# Optional extra editor token (with it set, the generated admin.json holds no token):
+# EnvironmentFile=-/etc/fluid-agent/agent.env
 Restart=always
 RestartSec=3
 LimitNOFILE=65536
 
-# Hardening: the agent only needs its config dir (API edits) and its database.
+# Hardening: the agent only writes to its StateDirectory (config, API edits, database).
 NoNewPrivileges=true
 ProtectSystem=strict
-ReadWritePaths=/opt/fluid-agent/dynamic /var/lib/fluid-agent
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
