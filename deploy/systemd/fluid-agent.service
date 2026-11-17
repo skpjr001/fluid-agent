@@ -1,0 +1,46 @@
+# /etc/systemd/system/fluid-agent.service
+#   sudo useradd -r -s /usr/sbin/nologin -d /opt/fluid-agent fluid
+#   sudo install -d -o fluid -g fluid -m 750 /opt/fluid-agent /opt/fluid-agent/dynamic /var/lib/fluid-agent
+#   sudo install -m 755 fluid-agent /usr/local/bin/
+#   config.json: "dynamic_dir": "/opt/fluid-agent/dynamic", "database": {"path": "/var/lib/fluid-agent/fluid-agent.db", ...}
+#   sudo -u fluid fluid-agent check -config /opt/fluid-agent/config.json
+#   sudo systemctl enable --now fluid-agent
+[Unit]
+Description=fluid-agent relay (forward proxy, webhooks, callback ingest)
+Documentation=https://github.com/skpjr001/fluid-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=fluid
+Group=fluid
+ExecStartPre=/usr/local/bin/fluid-agent check -config /opt/fluid-agent/config.json
+ExecStart=/usr/local/bin/fluid-agent serve -config /opt/fluid-agent/config.json
+# Optional bootstrap editor token (otherwise use dynamic/admin.json):
+# EnvironmentFile=/opt/fluid-agent/agent.env
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+
+# Hardening: the agent only needs its config dir (API edits) and its database.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/fluid-agent/dynamic /var/lib/fluid-agent
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+SystemCallArchitectures=native
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/proxy.schema.json",
+  "title": "fluid-agent proxy rules",
+  "description": "<dynamic_dir>/proxy.json — clients and destination rules (hot-reloaded).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of the JSON Schema for editor validation."
+    },
+    "clients": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "description": "Lowercase identifier: letters, digits, - and _, max 64."
+          },
+          "token": {
+            "type": "string",
+            "minLength": 16,
+            "description": "Secret token (min 16 chars). Generate with: openssl rand -hex 32"
+          },
+          "disabled": {
+            "type": "boolean",
+            "description": "Reject this client."
+          }
+        },
+        "required": [
+          "name",
+          "token"
+        ]
+      },
+      "description": "Named client credentials for the proxy and /forward."
+    },
+    "allowed_hosts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(\\*\\.)?[A-Za-z0-9.:\\[\\]_-]+$"
+      },
+      "description": "Exact hosts or *.domain (subdomains only)."
+    },
+    "allowed_ports": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 65535
+      },
+      "description": "Default [443]."
+    },
+    "allow_private": {
+      "type": "boolean",
+      "description": "Allow private, loopback and metadata destinations (off by default)."
+    },
+    "private_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "description": "IP address or CIDR, e.g. \"52.66.0.0/16\"."
+      },
+      "description": "Specific private CIDRs that are allowed."
+    }
+  },
+  "required": [
+    "clients",
+    "allowed_hosts"
+  ]
+}

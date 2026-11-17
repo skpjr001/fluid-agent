@@ -1,0 +1,28 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/ingest.schema.json",
+  "id": "nse-pay-status",
+  "description": "NSE UPI payment status callbacks",
+  "priority": 10,
+  "match": {
+    "type": "suffix",
+    "value": "/v1/apppaystatus"
+  },
+  "vendor": "NSE",
+  "event_type": "APP_PAY_STATUS",
+  "targets": [
+    "https://core.example.internal/api/callbacks/nse"
+  ],
+  "auth": {
+    "token": {
+      "header": "X-Callback-Token",
+      "value": "CHANGE-ME-callback-token"
+    }
+  },
+  "response": {
+    "status": 200,
+    "content_type": "application/json",
+    "body": "{\"status\":\"success\"}"
+  },
+  "created_at": "2026-11-17T00:00:00Z",
+  "updated_at": "2026-11-17T00:00:00Z"
+}

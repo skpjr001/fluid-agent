@@ -1,168 +1,218 @@
 package main
 
 import (
-	"bytes"
-	"context"
+	"errors"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// Delivery is metadata only (no bodies) so nothing sensitive is retained.
-type Delivery struct {
-	At         time.Time `json:"at"`
-	Method     string    `json:"method"`
-	Path       string    `json:"path"`
-	SourceIP   string    `json:"source_ip"`
-	ReqBytes   int       `json:"req_bytes"`
-	Status     int       `json:"status"`
-	Attempts   int       `json:"attempts"`
-	DurationMs int64     `json:"duration_ms"`
-	Error      string    `json:"error,omitempty"`
+// Inbound serves the public listener: /hooks/{id}[/sub/path] for webhooks,
+// health endpoints, and every other path for callback ingest rules.
+type Inbound struct {
+	app     *App
+	limiter *RateLimiter
 }
 
-type deliveryLog struct {
-	mu   sync.Mutex
-	byID map[string][]Delivery
-	max  int
+func NewInbound(app *App) *Inbound { return &Inbound{app: app, limiter: NewRateLimiter()} }
+
+func (in *Inbound) Handler() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) })
+	mux.HandleFunc("GET /readyz", in.app.readyz)
+	mux.HandleFunc("/hooks/", in.serveWebhook)
+	mux.HandleFunc("/", in.serveIngest)
+	return mux
 }
 
-func (l *deliveryLog) add(id string, d Delivery) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	s := append(l.byID[id], d)
-	if len(s) > l.max {
-		s = s[len(s)-l.max:]
+// inboundRoute is what serveRoute needs from a webhook or an ingest rule.
+type inboundRoute struct {
+	source    string // webhook | ingest
+	id        string
+	opts      *RouteOptions
+	vendor    string
+	eventType string
+	primary   string   // sync/async primary target (webhooks)
+	extra     []string // always async (mirrors / ingest targets)
+	async     bool
+	ack       *AckResponse // ingest reply
+}
+
+func (in *Inbound) serveWebhook(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/hooks/")
+	id, sub, _ := strings.Cut(rest, "/")
+	hook := in.app.store.Webhook(id)
+	if hook == nil || hook.Disabled {
+		http.NotFound(w, r)
+		return
 	}
-	l.byID[id] = s
-}
-
-func (l *deliveryLog) get(id string) []Delivery {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]Delivery, len(l.byID[id]))
-	copy(out, l.byID[id])
-	// newest first
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
-	return out
-}
-
-type WebhookRelay struct {
-	store        *Store
-	log          *deliveryLog
-	client       *http.Client
-	trustXFF     bool
-	maxBodyBytes int64
-}
-
-func NewWebhookRelay(s *Store, trustXFF bool, maxBody int64) *WebhookRelay {
-	return &WebhookRelay{
-		store:        s,
-		log:          &deliveryLog{byID: map[string][]Delivery{}, max: 50},
-		trustXFF:     trustXFF,
-		maxBodyBytes: maxBody,
-		client: &http.Client{
-			Transport: &http.Transport{Proxy: nil, MaxIdleConns: 100, IdleConnTimeout: 90 * time.Second},
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-	}
-}
-
-func (wr *WebhookRelay) clientIP(r *http.Request) net.IP {
-	if wr.trustXFF {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first, _, _ := strings.Cut(xff, ",")
-			if ip := net.ParseIP(strings.TrimSpace(first)); ip != nil {
-				return ip
+	join := func(t string) string {
+		u, _ := url.Parse(t)
+		if sub != "" {
+			u.Path = strings.TrimSuffix(u.Path, "/") + "/" + sub
+		}
+		if r.URL.RawQuery != "" {
+			if u.RawQuery != "" {
+				u.RawQuery += "&" + r.URL.RawQuery
+			} else {
+				u.RawQuery = r.URL.RawQuery
 			}
 		}
+		return u.String()
 	}
-	h, _, _ := net.SplitHostPort(r.RemoteAddr)
-	return net.ParseIP(h)
+	rt := inboundRoute{source: "webhook", id: id, opts: &hook.RouteOptions, primary: join(hook.Target), async: hook.Async}
+	for _, m := range hook.Mirrors {
+		rt.extra = append(rt.extra, join(m))
+	}
+	in.serveRoute(w, r, rt)
 }
 
-// Handles /hooks/{id} and /hooks/{id}/anything -> target + /anything
-func (wr *WebhookRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/hooks/")
-	if rest == r.URL.Path {
-		http.NotFound(w, r)
+func (in *Inbound) serveIngest(w http.ResponseWriter, r *http.Request) {
+	for _, rule := range in.app.store.Ingest() {
+		if rule.Disabled || !rule.matches(r.URL.Path) {
+			continue
+		}
+		in.serveRoute(w, r, inboundRoute{source: "ingest", id: rule.ID, opts: &rule.RouteOptions,
+			vendor: rule.Vendor, eventType: rule.EventType, extra: rule.Targets, async: true, ack: rule.Response})
 		return
 	}
-	id, sub, _ := strings.Cut(rest, "/")
-	hook := wr.store.Webhook(id)
-	if hook == nil || !hook.Enabled {
-		http.NotFound(w, r)
+	src := ClientIP(r, in.app.cfg.trusted).String()
+	in.app.metrics.Inc("fluid_inbound_requests_total", "source", "ingest", "route", "", "result", "unmatched")
+	slog.Warn("no ingest rule matched", "kind", "ingest", "direction", "inbound", "source_ip", src,
+		"method", r.Method, "url", r.URL.Path, "status", 404)
+	http.NotFound(w, r)
+}
+
+func (in *Inbound) reject(w http.ResponseWriter, rt inboundRoute, r *http.Request, src string, code int, result, why string, start time.Time) {
+	in.app.metrics.Inc("fluid_inbound_requests_total", "source", rt.source, "route", rt.id, "result", result)
+	slog.Warn(rt.source+" rejected", "kind", rt.source, "direction", "inbound", "route", rt.id, "source_ip", src,
+		"method", r.Method, "url", r.URL.Path, "status", code, "reason", why, "ms", time.Since(start).Milliseconds())
+	http.Error(w, strings.ToLower(http.StatusText(code)), code)
+}
+
+func (in *Inbound) serveRoute(w http.ResponseWriter, r *http.Request, rt inboundRoute) {
+	start := time.Now()
+	ip := ClientIP(r, in.app.cfg.trusted)
+	src := ip.String()
+	if !rt.opts.allowsMethod(r.Method) {
+		in.reject(w, rt, r, src, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed", start)
 		return
 	}
-	if !hook.allowsMethod(r.Method) {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !rt.opts.allowsIP(ip) {
+		in.reject(w, rt, r, src, http.StatusForbidden, "forbidden", "source IP not in source_cidrs", start)
 		return
 	}
-	ip := wr.clientIP(r)
-	if !hook.allowsIP(ip) {
-		slog.Warn("webhook source rejected", "id", id, "ip", ip)
-		http.Error(w, "forbidden", http.StatusForbidden)
+	lim := in.app.cfg.WebhookRateLimit
+	if rt.opts.RateLimit != nil {
+		lim = *rt.opts.RateLimit
+	}
+	if ok, wait := in.limiter.Allow(rt.source+"/"+rt.id+"/"+src, lim); !ok {
+		in.app.metrics.Inc("fluid_rate_limited_total", "source", rt.source, "route", rt.id)
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		in.reject(w, rt, r, src, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded", start)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, wr.maxBodyBytes))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, in.app.cfg.MaxBodyBytes))
 	if err != nil {
-		http.Error(w, "body too large", http.StatusRequestEntityTooLarge)
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			in.reject(w, rt, r, src, http.StatusRequestEntityTooLarge, "too_large", "body too large", start)
+		} else {
+			in.reject(w, rt, r, src, http.StatusBadRequest, "bad_request", "reading body: "+err.Error(), start)
+		}
+		return
+	}
+	if ok, why := verifyInbound(rt.opts.Auth, r, body); !ok {
+		in.reject(w, rt, r, src, http.StatusUnauthorized, "unauthorized", why, start)
 		return
 	}
 
-	target, _ := url.Parse(hook.Target)
-	if sub != "" {
-		target.Path = strings.TrimSuffix(target.Path, "/") + "/" + sub
-	}
-	if r.URL.RawQuery != "" {
-		if target.RawQuery != "" {
-			target.RawQuery += "&" + r.URL.RawQuery
-		} else {
-			target.RawQuery = r.URL.RawQuery
-		}
-	}
+	ctx, span := tracer.Start(extractTrace(r.Context(), r.Header), rt.source+" "+rt.id,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String("fluid.route", rt.id), attribute.String("client.address", src)))
+
 	hdr := r.Header.Clone()
 	stripHop(hdr)
-	hdr.Del("Host")
-	if ip != nil {
-		hdr.Set("X-Forwarded-For", ip.String())
+	for _, h := range credentialHeaders(rt.opts.Auth) {
+		hdr.Del(h)
 	}
-	hdr.Set("X-Forwarded-Host", r.Host)
-	hdr.Set("X-Webhook-Id", id)
-	for k, v := range hook.AddHeaders {
-		hdr.Set(k, v)
+	hdr.Del("Traceparent")
+	hdr.Del("Tracestate")
+	if r.Host != "" {
+		hdr.Set("X-Forwarded-Host", r.Host)
+	}
+	ev := &Event{ID: newID(), TS: start, Source: rt.source, Route: rt.id, Vendor: rt.vendor, EventType: rt.eventType,
+		Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, SourceIP: src, Headers: hdr, raw: body,
+		Traceparent: traceparentOf(ctx)}
+
+	retries := rt.opts.retries()
+	var specs []DeliverySpec
+	if rt.primary != "" {
+		mode := "sync"
+		if rt.async {
+			mode = "async"
+		}
+		specs = append(specs, DeliverySpec{Target: rt.primary, Mode: mode, MaxAttempts: retries + 1, TimeoutSec: rt.opts.TimeoutSec})
+	}
+	asyncRetries := retries
+	if !rt.async && asyncRetries == 0 {
+		asyncRetries = 8 // mirrors of a sync webhook still get durable retries
+	}
+	for _, t := range rt.extra {
+		specs = append(specs, DeliverySpec{Target: t, Mode: "async", MaxAttempts: asyncRetries + 1, TimeoutSec: rt.opts.TimeoutSec})
 	}
 
-	d := Delivery{At: time.Now(), Method: r.Method, Path: r.URL.Path, ReqBytes: len(body)}
-	if ip != nil {
-		d.SourceIP = ip.String()
+	dels, err := in.app.outbox.Record(ctx, ev, specs)
+	logDone := func(code int, extra ...any) {
+		result := "ok"
+		if code >= 400 {
+			result = "error"
+		}
+		in.app.metrics.Inc("fluid_inbound_requests_total", "source", rt.source, "route", rt.id, "result", result)
+		attrs := append([]any{"kind", rt.source, "direction", "inbound", "route", rt.id, "source_ip", src,
+			"method", r.Method, "host", r.Host, "url", r.URL.Path, "status", code, "bytes_in", len(body),
+			"ms", time.Since(start).Milliseconds(), "event_id", ev.ID, "vendor", rt.vendor, "event_type", rt.eventType}, extra...)
+		slog.InfoContext(ctx, rt.source+" received", attrs...)
+		endSpan(span, code, nil)
+	}
+	if err != nil {
+		slog.ErrorContext(ctx, "storing event failed", "kind", rt.source, "route", rt.id, "err", err)
+		if rt.async || rt.primary == "" {
+			// We cannot promise delivery, so make the sender retry.
+			http.Error(w, "temporarily unavailable", http.StatusServiceUnavailable)
+			logDone(http.StatusServiceUnavailable, "err", err.Error())
+			return
+		}
+		dels = []Delivery{{Target: rt.primary, Mode: "sync", MaxAttempts: retries + 1, TimeoutSec: rt.opts.TimeoutSec}}
 	}
 
-	if hook.Async {
+	if rt.ack != nil { // ingest: acknowledge once stored
+		w.Header().Set("Content-Type", rt.ack.ContentType)
+		w.Header().Set("X-Fluid-Event-Id", ev.ID)
+		w.WriteHeader(rt.ack.Status)
+		io.WriteString(w, rt.ack.Body)
+		logDone(rt.ack.Status)
+		return
+	}
+	if rt.async {
+		w.Header().Set("X-Fluid-Event-Id", ev.ID)
 		w.WriteHeader(http.StatusAccepted)
-		go func() {
-			resp, d := wr.deliver(context.Background(), hook, r.Method, target.String(), hdr, body, d)
-			if resp != nil {
-				resp.Body.Close()
-			}
-			wr.log.add(id, d)
-		}()
+		logDone(http.StatusAccepted)
 		return
 	}
 
-	resp, d := wr.deliver(r.Context(), hook, r.Method, target.String(), hdr, body, d)
-	wr.log.add(id, d)
+	resp := in.app.outbox.DeliverSync(ctx, ev, dels[0], rt.opts)
 	if resp == nil {
 		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+		logDone(http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
@@ -170,66 +220,8 @@ func (wr *WebhookRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for k, v := range resp.Header {
 		w.Header()[k] = v
 	}
+	w.Header().Set("X-Fluid-Event-Id", ev.ID)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
-}
-
-// deliver tries once, plus MaxRetries more on network errors / 5xx, with backoff.
-func (wr *WebhookRelay) deliver(ctx context.Context, hook *Webhook, method, target string,
-	hdr http.Header, body []byte, d Delivery) (*http.Response, Delivery) {
-
-	start := time.Now()
-	backoff := 500 * time.Millisecond
-	var lastErr string
-	for attempt := 0; attempt <= hook.MaxRetries; attempt++ {
-		d.Attempts = attempt + 1
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				lastErr = ctx.Err().Error()
-				attempt = hook.MaxRetries + 1
-				continue
-			case <-time.After(backoff):
-			}
-			backoff *= 2
-		}
-		actx, cancel := context.WithTimeout(ctx, time.Duration(hook.TimeoutSec)*time.Second)
-		req, err := http.NewRequestWithContext(actx, method, target, bytes.NewReader(body))
-		if err != nil {
-			cancel()
-			lastErr = err.Error()
-			break
-		}
-		req.Header = hdr.Clone()
-		resp, err := wr.client.Do(req)
-		if err != nil {
-			cancel()
-			lastErr = err.Error()
-			continue
-		}
-		if resp.StatusCode >= 500 && attempt < hook.MaxRetries {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			cancel()
-			lastErr = resp.Status
-			continue
-		}
-		// Buffer the response so the timeout context can be released safely.
-		rb, err := io.ReadAll(io.LimitReader(resp.Body, wr.maxBodyBytes))
-		resp.Body.Close()
-		cancel()
-		if err != nil {
-			lastErr = err.Error()
-			continue
-		}
-		resp.Body = io.NopCloser(bytes.NewReader(rb))
-		d.Status = resp.StatusCode
-		d.DurationMs = time.Since(start).Milliseconds()
-		slog.Info("webhook relayed", "id", hook.ID, "status", resp.StatusCode, "attempts", d.Attempts, "ms", d.DurationMs)
-		return resp, d
-	}
-	d.Error = lastErr
-	d.DurationMs = time.Since(start).Milliseconds()
-	slog.Error("webhook delivery failed", "id", hook.ID, "attempts", d.Attempts, "err", lastErr)
-	return nil, d
+	logDone(resp.StatusCode)
 }

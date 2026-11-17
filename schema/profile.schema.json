@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/profile.schema.json",
+  "title": "fluid-agent forward profile",
+  "description": "<dynamic_dir>/profiles/<name>.json — named upstream for POST /forward; the agent adds headers so clients never hold provider credentials.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of the JSON Schema for editor validation."
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Lowercase identifier: letters, digits, - and _, max 64."
+    },
+    "description": {
+      "type": "string",
+      "description": "Free text."
+    },
+    "base_url": {
+      "type": "string",
+      "pattern": "^https?://[^/@\\s]+(/\\S*)?$",
+      "description": "Absolute http(s) URL without credentials."
+    },
+    "headers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+        "description": "HTTP header name."
+      },
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Headers added to every request (usually credentials). Write-only over the API."
+    },
+    "allowed_methods": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Allowed methods; empty allows any."
+    },
+    "clients": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+        "description": "Lowercase identifier: letters, digits, - and _, max 64."
+      },
+      "description": "Client names allowed to use this profile; empty allows all."
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 300,
+      "description": "Request timeout in seconds; 0 uses forward.default_timeout."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Set by the agent."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Set by the agent."
+    }
+  },
+  "required": [
+    "base_url"
+  ]
+}

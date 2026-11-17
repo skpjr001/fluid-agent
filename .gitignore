@@ -1,9 +1,16 @@
-# Local config / secrets
-config.json
+# Local config, runtime state and secrets (examples live in examples/)
+/config.json
 .env
-dynamic/webhooks/*.json
+/dynamic/
+/data/
+*.db
+*.db-wal
+*.db-shm
 
 # Build output
 /fluid-agent
+/dist/
 *.exe
+
+# Local sample archives
 samples/

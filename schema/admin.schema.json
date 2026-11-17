@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/admin.schema.json",
+  "title": "fluid-agent admin tokens",
+  "description": "<dynamic_dir>/admin.json — tokens for the admin API and UI. Not editable over the API.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of the JSON Schema for editor validation."
+    },
+    "tokens": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "description": "Lowercase identifier: letters, digits, - and _, max 64."
+          },
+          "token": {
+            "type": "string",
+            "minLength": 16,
+            "description": "Secret token (min 16 chars)."
+          },
+          "role": {
+            "enum": [
+              "viewer",
+              "editor"
+            ],
+            "description": "viewer: read-only (secrets masked). editor: can change config."
+          }
+        },
+        "required": [
+          "name",
+          "token",
+          "role"
+        ]
+      },
+      "description": "Admin/UI tokens."
+    }
+  },
+  "required": [
+    "tokens"
+  ]
+}

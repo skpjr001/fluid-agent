@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/proxy.schema.json",
+  "clients": [
+    {
+      "name": "dev-laptop",
+      "token": "CHANGE-ME-generate-with-openssl-rand-hex-32"
+    }
+  ],
+  "allowed_hosts": [
+    "api.razorpay.com",
+    "*.nseindia.com",
+    "*.bseindia.com"
+  ],
+  "allowed_ports": [
+    443
+  ],
+  "allow_private": false,
+  "private_allowlist": []
+}

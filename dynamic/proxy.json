@@ -1,5 +1,0 @@
-{
-  "tokens": ["CHANGE-ME-long-random-token"],
-  "allowed_hosts": ["api.razorpay.com", "*.nseindia.com"],
-  "allowed_ports": [443]
-}

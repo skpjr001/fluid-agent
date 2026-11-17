@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/profile.schema.json",
+  "name": "razorpay",
+  "description": "Razorpay API with the agent holding the key",
+  "base_url": "https://api.razorpay.com/v1",
+  "headers": {
+    "Authorization": "Basic CHANGE-ME-base64-key-secret"
+  },
+  "allowed_methods": [
+    "GET",
+    "POST"
+  ],
+  "clients": [
+    "dev-laptop"
+  ],
+  "timeout_sec": 30,
+  "created_at": "2026-11-17T00:00:00Z",
+  "updated_at": "2026-11-17T00:00:00Z"
+}

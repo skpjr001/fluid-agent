@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/config.schema.json",
+  "title": "fluid-agent static config",
+  "description": "Read once at startup (config.json).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of the JSON Schema for editor validation."
+    },
+    "proxy_addr": {
+      "type": "string",
+      "default": ":8080",
+      "description": "Forward proxy + /forward listener."
+    },
+    "webhook_addr": {
+      "type": "string",
+      "default": ":8081",
+      "description": "Public webhook and ingest listener."
+    },
+    "admin_addr": {
+      "type": "string",
+      "default": "127.0.0.1:9000",
+      "description": "Admin API and UI listener; keep on localhost."
+    },
+    "dynamic_dir": {
+      "type": "string",
+      "default": "./dynamic",
+      "description": "Directory of hot-reloaded JSON files."
+    },
+    "reload_interval": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "Go duration string, e.g. \"30s\", \"5m\"."
+    },
+    "max_conns": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 2000,
+      "description": "Concurrent proxy requests/tunnels."
+    },
+    "max_body_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 10485760,
+      "description": "Max inbound body size."
+    },
+    "trusted_proxies": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "description": "IP address or CIDR, e.g. \"52.66.0.0/16\"."
+      },
+      "description": "Reverse proxies whose X-Forwarded-For is believed (walked right to left)."
+    },
+    "tunnel_idle_timeout": {
+      "type": "string",
+      "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+      "description": "Go duration string, e.g. \"30s\", \"5m\"."
+    },
+    "webhook_rate_limit": {
+      "$ref": "#/$defs/rateLimit"
+    },
+    "forward": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_response_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Max upstream response size."
+        },
+        "max_redirects": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Redirects followed (each re-checked)."
+        },
+        "default_timeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "description": "Go duration string, e.g. \"30s\", \"5m\"."
+        },
+        "max_timeout": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "description": "Go duration string, e.g. \"30s\", \"5m\"."
+        }
+      },
+      "description": "JSON /forward relay settings."
+    },
+    "database": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "description": "SQLite file."
+        },
+        "retention_days": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Days to keep logs, events and finished deliveries."
+        },
+        "log_level": {
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "description": "Minimum level stored."
+        },
+        "store_event_bodies": {
+          "type": "boolean",
+          "description": "Keep bodies after delivery (shown in the UI)."
+        }
+      },
+      "description": "SQLite storage."
+    },
+    "outbox": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "workers": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Concurrent background deliveries."
+        },
+        "poll_interval": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "description": "Go duration string, e.g. \"30s\", \"5m\"."
+        },
+        "max_backoff": {
+          "type": "string",
+          "pattern": "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$",
+          "description": "Go duration string, e.g. \"30s\", \"5m\"."
+        }
+      },
+      "description": "Durable delivery queue."
+    },
+    "telemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "otlp_endpoint": {
+          "type": "string",
+          "description": "OTLP/HTTP base URL, e.g. http://otel-collector:4318. Empty disables tracing."
+        },
+        "service_name": {
+          "type": "string",
+          "description": "service.name resource attribute."
+        },
+        "sample_ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Fraction of new traces sampled."
+        },
+        "headers": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Headers sent to the collector."
+        }
+      },
+      "description": "OpenTelemetry tracing."
+    }
+  },
+  "$defs": {
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sustained requests per minute per source IP; 0 disables."
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bucket size (requests allowed at once)."
+        }
+      },
+      "description": "Token-bucket rate limit per source IP."
+    }
+  }
+}

@@ -29,8 +29,17 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test
-        run: go test -race ./...
+      - name: Test (race detector)
+        run: go test -race -count=1 ./...
+
+      - name: UI script syntax
+        run: node --check ui/app.js
+
+      - name: Example configs validate
+        run: |
+          go run . check -config config.example.json || true   # ./dynamic is git-ignored
+          mkdir -p /tmp/fa && sed 's#"./dynamic"#"examples/dynamic"#' config.example.json > /tmp/fa/config.json
+          go run . check -config /tmp/fa/config.json
 
       - name: Build
         run: CGO_ENABLED=0 go build -trimpath -o fluid-agent .

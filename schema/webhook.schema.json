@@ -1,0 +1,305 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/webhook.schema.json",
+  "title": "fluid-agent webhook",
+  "description": "<dynamic_dir>/webhooks/<id>.json — public URL /hooks/<id>.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Path or URL of the JSON Schema for editor validation."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+      "description": "Lowercase identifier: letters, digits, - and _, max 64."
+    },
+    "description": {
+      "type": "string",
+      "description": "Free text."
+    },
+    "disabled": {
+      "type": "boolean",
+      "description": "Answer 404 while disabled."
+    },
+    "target": {
+      "type": "string",
+      "pattern": "^https?://[^/@\\s]+(/\\S*)?$",
+      "description": "Primary destination; /hooks/{id}/x?q is relayed to target/x?q."
+    },
+    "mirrors": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^https?://[^/@\\s]+(/\\S*)?$",
+        "description": "Absolute http(s) URL without credentials."
+      },
+      "description": "Extra destinations, always delivered durably in the background."
+    },
+    "async": {
+      "type": "boolean",
+      "description": "Reply 202 once stored and deliver in the background (with retries)."
+    },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(\\*|[A-Za-z]+)$"
+      },
+      "uniqueItems": true,
+      "description": "Allowed methods; default [\"POST\"]; \"*\" allows any."
+    },
+    "source_cidrs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 2,
+        "description": "IP address or CIDR, e.g. \"52.66.0.0/16\"."
+      },
+      "description": "Only accept senders from these IPs/CIDRs."
+    },
+    "auth": {
+      "$ref": "#/$defs/inboundAuth"
+    },
+    "rate_limit": {
+      "$ref": "#/$defs/rateLimit"
+    },
+    "add_headers": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+        "description": "HTTP header name."
+      },
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Headers set on relayed requests."
+    },
+    "target_auth": {
+      "$ref": "#/$defs/targetAuth"
+    },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 20,
+      "description": "Retries on network errors, 408, 429 and 5xx. Default 0 for sync, 8 for async."
+    },
+    "timeout_sec": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 300,
+      "default": 15,
+      "description": "Per-attempt timeout in seconds."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Set by the agent."
+    },
+    "updated_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Set by the agent."
+    }
+  },
+  "required": [
+    "target"
+  ],
+  "$defs": {
+    "rateLimit": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Sustained requests per minute per source IP; 0 disables."
+        },
+        "burst": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bucket size (requests allowed at once)."
+        }
+      },
+      "description": "Token-bucket rate limit per source IP."
+    },
+    "inboundAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "type": "string",
+              "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+              "description": "HTTP header name."
+            },
+            "value": {
+              "type": "string",
+              "minLength": 8,
+              "description": "Expected value (min 8 chars)."
+            }
+          },
+          "required": [
+            "header",
+            "value"
+          ],
+          "description": "Shared token in a header."
+        },
+        "basic": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "username": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Username."
+            },
+            "password": {
+              "type": "string",
+              "minLength": 8,
+              "description": "Password (min 8 chars)."
+            }
+          },
+          "required": [
+            "username",
+            "password"
+          ],
+          "description": "HTTP Basic credentials."
+        },
+        "hmac": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "header": {
+              "type": "string",
+              "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+              "description": "HTTP header name."
+            },
+            "secret": {
+              "type": "string",
+              "minLength": 8,
+              "description": "Signing secret (min 8 chars)."
+            },
+            "algorithm": {
+              "enum": [
+                "sha1",
+                "sha256",
+                "sha512"
+              ],
+              "default": "sha256",
+              "description": "Hash algorithm."
+            },
+            "encoding": {
+              "enum": [
+                "hex",
+                "base64"
+              ],
+              "default": "hex",
+              "description": "Signature encoding."
+            },
+            "prefix": {
+              "type": "string",
+              "description": "Prefix stripped from the header value, e.g. \"sha256=\"."
+            }
+          },
+          "required": [
+            "header",
+            "secret"
+          ],
+          "description": "HMAC signature of the raw body."
+        }
+      },
+      "description": "Optional inbound authentication; every configured method must pass.",
+      "minProperties": 1
+    },
+    "targetAuth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "bearer",
+            "basic",
+            "header"
+          ],
+          "description": "Credential type."
+        },
+        "token": {
+          "type": "string",
+          "description": "Bearer token."
+        },
+        "username": {
+          "type": "string",
+          "description": "Basic username."
+        },
+        "password": {
+          "type": "string",
+          "description": "Basic password."
+        },
+        "header": {
+          "type": "string",
+          "pattern": "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$",
+          "description": "HTTP header name."
+        },
+        "value": {
+          "type": "string",
+          "description": "Header value."
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "description": "Credentials sent to the destination(s).",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "bearer"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "token"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "basic"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "username"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "header"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "header",
+              "value"
+            ]
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+.git
+.github
+samples
+data
+dynamic
+dist
+*.db*

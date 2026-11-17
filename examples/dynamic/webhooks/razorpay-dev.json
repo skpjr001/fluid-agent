@@ -1,0 +1,35 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/webhook.schema.json",
+  "id": "razorpay-dev",
+  "description": "Razorpay payment webhooks for the dev box",
+  "target": "https://dev.example.internal/payments/callback",
+  "mirrors": [
+    "https://staging.example.internal/payments/callback"
+  ],
+  "async": true,
+  "methods": [
+    "POST"
+  ],
+  "source_cidrs": [
+    "52.66.0.0/16"
+  ],
+  "auth": {
+    "hmac": {
+      "header": "X-Razorpay-Signature",
+      "secret": "CHANGE-ME-webhook-secret",
+      "algorithm": "sha256",
+      "encoding": "hex"
+    }
+  },
+  "target_auth": {
+    "type": "bearer",
+    "token": "CHANGE-ME-internal-token"
+  },
+  "add_headers": {
+    "X-Env": "dev"
+  },
+  "max_retries": 8,
+  "timeout_sec": 15,
+  "created_at": "2026-11-17T00:00:00Z",
+  "updated_at": "2026-11-17T00:00:00Z"
+}

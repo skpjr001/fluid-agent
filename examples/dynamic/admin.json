@@ -1,0 +1,15 @@
+{
+  "$schema": "https://raw.githubusercontent.com/skpjr001/fluid-agent/main/schema/admin.schema.json",
+  "tokens": [
+    {
+      "name": "ops",
+      "token": "CHANGE-ME-editor-token-openssl-rand-hex-32",
+      "role": "editor"
+    },
+    {
+      "name": "support",
+      "token": "CHANGE-ME-viewer-token-openssl-rand-hex-32",
+      "role": "viewer"
+    }
+  ]
+}

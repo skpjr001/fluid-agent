@@ -1,11 +1,38 @@
 {
+  "$schema": "./schema/config.schema.json",
   "proxy_addr": ":8080",
   "webhook_addr": ":8081",
   "admin_addr": "127.0.0.1:9000",
-  "admin_token": "CHANGE-ME-use-PROXY_ADMIN_TOKEN-env",
   "dynamic_dir": "./dynamic",
   "reload_interval": "2s",
-  "trust_forwarded_for": false,
   "max_conns": 2000,
-  "max_body_bytes": 10485760
+  "max_body_bytes": 10485760,
+  "trusted_proxies": [],
+  "tunnel_idle_timeout": "5m",
+  "webhook_rate_limit": {
+    "requests_per_minute": 600,
+    "burst": 100
+  },
+  "forward": {
+    "max_response_bytes": 10485760,
+    "max_redirects": 5,
+    "default_timeout": "20s",
+    "max_timeout": "2m"
+  },
+  "database": {
+    "path": "./data/fluid-agent.db",
+    "retention_days": 14,
+    "log_level": "info",
+    "store_event_bodies": true
+  },
+  "outbox": {
+    "workers": 4,
+    "poll_interval": "1s",
+    "max_backoff": "10m"
+  },
+  "telemetry": {
+    "otlp_endpoint": "",
+    "service_name": "fluid-agent",
+    "sample_ratio": 1
+  }
 }
