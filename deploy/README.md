@@ -76,7 +76,7 @@ sudo bash install.sh --yes --expose-ui 127.0.0.1:9000 --expose-webhook 0.0.0.0:8
 1. **Checks** the OS and CPU (amd64/arm64), init system, memory, free disk where Docker keeps its data (stops when too low), package manager and internet access.
 2. **Installs what is missing**: curl, tar and CA certificates; Docker Engine and the Compose plugin from Docker's official repositories (apt/dnf/yum; Compose as a verified binary on Amazon Linux and SUSE). Without systemd it starts `dockerd` itself. Go is offered but not needed: the image is built from the checksum-verified release binary (or from git with `--source`).
 3. **Asks**, each with a safe default:
-   * storage: **Docker volumes** `fluid-agent-data` and `fluid-agent-dynamic` (default) or host directories (owned by the container user 65532);
+   * storage: **Docker volumes** `fluid-agent-data` and `fluid-agent-dynamic` (default) or host directories, by default `/fluid/agent/data` and `/fluid/agent/dynamic`, created if missing and given to the container user (uid 65532, mode 0750, including files already inside) on every run;
    * whether to publish the **proxy** (8080), the **webhook listener** (8081) and the **console** (9000) on the host, one by one, **default: not exposed**; for each one exposed, the bind address (`127.0.0.1` or `0.0.0.0`) and host port;
    * which client IPs may use the proxy and the console (`access.json`; webhook senders are set per route with `allowed_ips`).
 4. **Runs** it with Docker Compose in `/opt/fluid-agent` (`config.json`, `docker-compose.yml`, a copy of the installer), waits until healthy, and prints the URLs, how to read the generated editor token, and how to manage it.

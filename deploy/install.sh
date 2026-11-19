@@ -24,6 +24,7 @@ ASSUME_YES=0
 WITH_GO=""             # yes | no | "" (ask)
 STORAGE=""             # volume | bind | "" (ask)
 DATA_PATH=""           # host directory base for bind mounts
+DEFAULT_DATA_PATH="/fluid/agent"   # default for --storage bind: <path>/data and <path>/dynamic
 EXPOSE_PROXY="" EXPOSE_WEBHOOK="" EXPOSE_UI=""      # no | PORT | IP:PORT | "" (ask)
 ALLOW_PROXY="" ALLOW_UI=""                          # comma-separated allowlists, "" = ask/keep
 UNINSTALL=0 PURGE=0 FORCE=0
@@ -47,7 +48,7 @@ Usage: sudo bash install.sh [options]
   --version TAG            release to install, e.g. v0.4.0 (default: latest)
   --source                 build the image from the git repository instead of the release binary
   --storage volume|bind    keep data in Docker volumes (default) or host directories
-  --data-path PATH         base directory for --storage bind (default <dir>/data and <dir>/dynamic)
+  --data-path PATH         base directory for --storage bind: PATH/data and PATH/dynamic (default /fluid/agent)
   --expose-proxy  no|PORT|IP:PORT   publish the forward proxy (container 8080)
   --expose-webhook no|PORT|IP:PORT  publish the webhook/ingest listener (container 8081)
   --expose-ui     no|PORT|IP:PORT   publish the console + API (container 9000)
@@ -138,11 +139,14 @@ if [ "$UNINSTALL" = 1 ]; then
   [ -f "$DIR/docker-compose.yml" ] || die "no installation found in $DIR"
   info "stopping and removing the container"
   if [ "$PURGE" = 1 ]; then
-    yesno "Delete ALL data (database, dynamic config, volumes) in $DIR? This cannot be undone." n || die "aborted"
+    where="$DIR"
+    [ "${PREV_STORAGE:-}" = bind ] && [ -n "${PREV_DATA_PATH:-}" ] && where="$DIR and $PREV_DATA_PATH"
+    yesno "Delete ALL data (database, dynamic config, volumes) in $where? This cannot be undone." n || die "aborted"
     compose down --volumes --rmi local || true
     if [ "${PREV_STORAGE:-}" = bind ] && [ -n "${PREV_DATA_PATH:-}" ]; then
       rm -rf "${PREV_DATA_PATH:?}/data" "${PREV_DATA_PATH:?}/dynamic"
       rmdir "$PREV_DATA_PATH" 2>/dev/null || true
+      [ "$PREV_DATA_PATH" = "$DEFAULT_DATA_PATH" ] && { rmdir "$(dirname "$PREV_DATA_PATH")" 2>/dev/null || true; }   # /fluid, when empty
     fi
     rm -rf "${DIR:?}"
     ok "removed everything"
@@ -347,7 +351,10 @@ if [ -n "${PREV_STORAGE:-}" ] && [ "$STORAGE" != "$PREV_STORAGE" ]; then
   yesno "Continue with $STORAGE storage?" n || die "aborted"
 fi
 if [ "$STORAGE" = bind ]; then
-  [ -n "$DATA_PATH" ] || { DATA_PATH=${PREV_DATA_PATH:-$DIR}; ask DATA_PATH "Host directory for data/ and dynamic/" "$DATA_PATH"; }
+  [ -n "$DATA_PATH" ] || { DATA_PATH=${PREV_DATA_PATH:-$DEFAULT_DATA_PATH}; ask DATA_PATH "Host directory for data/ and dynamic/ (created if missing)" "$DATA_PATH"; }
+  case "$DATA_PATH" in /*) ;; *) die "the data directory must be an absolute path, got $DATA_PATH" ;; esac
+  DATA_PATH=${DATA_PATH%/}
+  case "$DATA_PATH" in ""|/bin|/boot|/dev|/etc|/lib|/lib64|/proc|/root|/run|/sbin|/sys|/usr|/var) die "refusing to use $DATA_PATH/ as the data directory; pick a dedicated one such as $DEFAULT_DATA_PATH" ;; esac
   ok "storage: host directories $DATA_PATH/data and $DATA_PATH/dynamic"
 else
   ok "storage: Docker volumes fluid-agent-data and fluid-agent-dynamic"
@@ -490,9 +497,17 @@ else
 fi
 
 if [ "$STORAGE" = bind ]; then
+  # The base (and any missing parent, e.g. /fluid) belongs to root and is
+  # world-traversable; data/ and dynamic/ belong to the container's user
+  # (uid 65532) and nobody else, including files copied in by hand.
+  parent=$(dirname "$DATA_PATH")
+  [ -d "$parent" ] || { mkdir -p "$parent" && chmod 0755 "$parent" && ok "created $parent"; }
+  [ -d "$DATA_PATH" ] || { mkdir -p "$DATA_PATH" && ok "created $DATA_PATH"; }
+  chmod 0755 "$DATA_PATH"
   mkdir -p "$DATA_PATH/data" "$DATA_PATH/dynamic"
-  chown "$NONROOT_UID:$NONROOT_UID" "$DATA_PATH/data" "$DATA_PATH/dynamic"
+  chown -R "$NONROOT_UID:$NONROOT_UID" "$DATA_PATH/data" "$DATA_PATH/dynamic"
   chmod 0750 "$DATA_PATH/data" "$DATA_PATH/dynamic"
+  ok "permissions: $DATA_PATH/data and $DATA_PATH/dynamic owned by uid $NONROOT_UID (mode 0750)"
   DATA_MOUNT="$DATA_PATH/data"; DYN_MOUNT="$DATA_PATH/dynamic"
 else
   DATA_MOUNT="fluid-agent-data"; DYN_MOUNT="fluid-agent-dynamic"
