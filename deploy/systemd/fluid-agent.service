@@ -25,7 +25,8 @@ WorkingDirectory=/var/lib/fluid-agent
 # init creates anything missing and refuses to start on invalid config files.
 ExecStartPre=/usr/local/bin/fluid-agent init -config /var/lib/fluid-agent/config.json
 ExecStart=/usr/local/bin/fluid-agent serve -config /var/lib/fluid-agent/config.json
-# Optional extra editor token (with it set, the generated admin.json holds no token):
+# Optional extra editor token (with it set, the generated admin.json holds no token)
+# and tracing endpoint; start from example.env in the repository:
 # EnvironmentFile=-/etc/fluid-agent/agent.env
 Restart=always
 RestartSec=3

@@ -6,7 +6,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s                  # > shutdown_timeout (15s): in-flight work finishes on docker stop
     environment:
-      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set in .env}   # bootstrap editor token
+      PROXY_ADMIN_TOKEN: ${PROXY_ADMIN_TOKEN:?set in .env}   # bootstrap editor token (cp example.env .env)
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}   # optional tracing
     # Without these mounts the agent creates /app/config.json and /app/dynamic
     # (proxy.json, admin.json with a generated token, webhooks/ ingest/ profiles/)
     # itself on first start. A bind-mounted file must exist on the host first,
