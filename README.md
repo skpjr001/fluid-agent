@@ -14,13 +14,13 @@ Everything is stored in one SQLite file (logs, events, deliveries) and all confi
 
 No setup is needed: on first start the agent creates every directory and config file it is missing (see [First start](#first-start-what-is-created)).
 
-**On a fresh Linux VM** (Ubuntu, Debian, Fedora, RHEL/Rocky/Alma, Amazon Linux), the installer checks the system, installs Docker if needed and runs the agent in a container:
+**On a fresh Linux VM** (Ubuntu, Debian, Fedora, RHEL/Rocky/Alma, Amazon Linux, openSUSE, Alpine), the installer checks the system, installs Docker if needed and runs the agent in a container:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skpjr001/fluid-agent/main/deploy/install.sh | sudo bash
 ```
 
-It asks whether to expose the proxy, the webhook listener and the console on the host, each separately and **not exposed by default**, where to keep data (Docker volumes by default, or host directories), and which client IPs may use the proxy and console. See [deploy/README.md](deploy/README.md#installer-for-a-linux-vm).
+It asks whether to expose the proxy, the webhook listener and the console on the host, each separately and **not exposed by default**, where to keep data (Docker volumes by default, or host directories under `/fluid/agent`), and which client IPs may use the proxy and console. See [deploy/README.md](deploy/README.md#installer-for-a-linux-vm).
 
 **On a host**
 
@@ -49,6 +49,17 @@ docker run -d --name fluid-agent -p 8080:8080 -p 8081:8081 -v fluid-data:/app/da
 With no mounts the agent creates `/app/config.json` and `/app/dynamic/`. For the Traefik setup in [`compose.yml`](compose.yml): `cp config.docker.json config.json`, `cp example.env .env` and set `PROXY_ADMIN_TOKEN`, set the host in `compose.yml`, then `docker compose up -d`. A bind-mounted file must exist on the host first (Docker would otherwise create a directory in its place, and the agent says so); a bind-mounted directory must be writable by uid 65532 for console edits.
 
 **Then:** open the console through an SSH tunnel (`ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>) and sign in with the token from `admin.json`. Add proxy clients, allowed hosts, webhooks and ingest rules there, or copy the samples from [`examples/dynamic`](examples/dynamic) (replace every CHANGE-ME value) and run `fluid-agent check`.
+
+### Debugging inside a container
+
+The image is distroless: it holds only the agent binary, CA certificates and time-zone data, with no shell or curl, so `docker exec fluid-agent sh` does not work. That is deliberate, because an intruder finds no tools there. To see what the agent sees, run curl in a throwaway container that shares its network:
+
+```bash
+docker run --rm --network container:fluid-agent curlimages/curl -s http://127.0.0.1:8081/livez
+docker run --rm --network container:fluid-agent curlimages/curl -s -x http://ci:<CLIENT_TOKEN>@127.0.0.1:8080 https://api.razorpay.com/
+```
+
+`127.0.0.1` is the agent's own loopback, and other containers resolve by name as they do for the agent. Nothing is left behind afterwards. For the agent's own view, use `docker exec fluid-agent /fluid-agent check -config /app/config.json` and `… logs`.
 
 ### First start: what is created
 
@@ -253,7 +264,7 @@ curl -H "$A" -o events.csv "$API/events?format=csv&tz=Asia/Kolkata&f.status==fai
 
 ## Console and API
 
-The console is a plain-JS single page embedded in the binary (no build step, strict CSP). It has Overview, Events (body, headers and deliveries in a side panel), Deliveries (list + Kanban board with dead-letter retry), Logs, Webhooks, Ingest rules, Forward profiles, Proxy & clients and Status pages, with live updates over Server-Sent Events.
+The console is a plain-JS single page embedded in the binary (no build step, strict CSP). It has Overview, Events (body, headers and deliveries in a side panel), Deliveries (list + Kanban board with dead-letter retry), Logs, Webhooks, Ingest rules, Forward profiles, Proxy & clients, Access (IP allowlists with an address tester) and Status pages, with live updates over Server-Sent Events.
 
 * **Viewer** tokens can read everything; secrets are masked and `add_headers` values hidden.
 * **Editor** tokens can also create, edit and delete webhooks, ingest rules, profiles, proxy rules and clients, and retry deliveries. Secrets are write-only: sending the mask `********` back keeps the stored value.
@@ -312,7 +323,7 @@ go run . init -config /tmp/fa/config.json   # what a first start creates
 Prebuilt binaries for Linux, macOS and Windows (amd64/arm64) are on the [Releases](https://github.com/skpjr001/fluid-agent/releases) page, with `checksums.txt`. To cut a release, push a tag:
 
 ```sh
-git tag v0.3.0 && git push origin v0.3.0
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
 `fluid-agent version` prints the version a binary was built from.

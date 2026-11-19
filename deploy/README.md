@@ -14,7 +14,7 @@ fluid-agent runs as a plain binary (systemd), in a container, with or without a 
 * **Base paths** (`proxy_base_path`, `webhook_base_path`, `admin_base_path`) accept requests both with and without the prefix, so it does not matter whether the reverse proxy strips it. The console learns its external prefix from `admin_base_path`, or from `X-Forwarded-Prefix` sent by a peer in `trusted_proxies` (Traefik's StripPrefix sets it; for Caddy add `header_up X-Forwarded-Prefix /console`).
 * **The forward proxy** speaks HTTP proxy protocol (`CONNECT`, absolute URLs), which HTTP reverse proxies cannot route. Expose it directly (firewalled), give it `proxy_tls`, or pass it through as TCP (nginx `stream {}`, Traefik TCP router). Caddy's core has no TCP proxy.
 * **IP allowlists** are restricted by default to loopback and private networks: each webhook and ingest rule takes `allowed_ips` in its own file, and the proxy and console take theirs from `dynamic/access.json`. Internet senders get `403` until their addresses are listed (wildcards like `52.66.*.*` work). Behind a reverse proxy the real client address is checked only if the proxy is in `trusted_proxies`; in a container with published ports, rootless Podman or Docker's userland proxy can replace it with the gateway address, which the agent warns about.
-* **Behind any proxy** set `trusted_proxies` to the proxy's address so `source_cidrs`, rate limits and logs see the real sender. Configure the proxy to *overwrite* `X-Forwarded-For` (`$remote_addr`) where possible.
+* **Behind any proxy** set `trusted_proxies` to the proxy's address so `allowed_ips`, rate limits and logs see the real sender. Configure the proxy to *overwrite* `X-Forwarded-For` (`$remote_addr`) where possible.
 
 ## First start creates what is missing
 
@@ -80,6 +80,8 @@ sudo bash install.sh --yes --expose-ui 127.0.0.1:9000 --expose-webhook 0.0.0.0:8
    * whether to publish the **proxy** (8080), the **webhook listener** (8081) and the **console** (9000) on the host, one by one, **default: not exposed**; for each one exposed, the bind address (`127.0.0.1` or `0.0.0.0`) and host port;
    * which client IPs may use the proxy and the console (`access.json`; webhook senders are set per route with `allowed_ips`).
 4. **Runs** it with Docker Compose in `/opt/fluid-agent` (`config.json`, `docker-compose.yml`, a copy of the installer), waits until healthy, and prints the URLs, how to read the generated editor token, and how to manage it.
+
+To look around from inside the container, see [Debugging inside a container](../README.md#debugging-inside-a-container): the image has no shell or curl.
 
 Re-running upgrades to the latest release and keeps config, data and earlier answers (pass new `--expose-*` / `--allow-*` values to change them). `--uninstall` removes the container and keeps the data; `--uninstall --purge` deletes everything after confirmation. `--help` lists every option; every question also has a flag, so `--yes` installs unattended.
 
