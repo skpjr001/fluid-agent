@@ -40,12 +40,11 @@ jobs:
 
       - name: Example configs validate
         run: |
-          go run . check -config config.example.json || true   # ./dynamic is git-ignored
-          mkdir -p /tmp/fa && sed 's#"./dynamic"#"examples/dynamic"#' config.example.json > /tmp/fa/config.json
-          go run . check -config /tmp/fa/config.json
+          mkdir -p /tmp/fa && sed 's#"./dynamic"#"examples/dynamic"#' examples/config.example.json > /tmp/fa/config.json
+          go run ./cmd/fluid-agent check -config /tmp/fa/config.json
 
       - name: Build
-        run: CGO_ENABLED=0 go build -trimpath -o fluid-agent .
+        run: CGO_ENABLED=0 go build -trimpath -o fluid-agent ./cmd/fluid-agent
 
       - name: Docker build
         run: docker build -t fluid-agent:ci .

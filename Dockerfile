@@ -2,11 +2,12 @@ FROM docker.io/library/golang:1.27.4-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY *.go ./
+COPY cmd ./cmd
+COPY internal ./internal
 COPY ui ./ui
 COPY schema ./schema
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /fluid-agent . \
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /fluid-agent ./cmd/fluid-agent \
  && mkdir -p /out/app/data /out/app/dynamic
 
 FROM gcr.io/distroless/static:nonroot

@@ -46,7 +46,7 @@ docker build -t fluid-agent .
 docker run -d --name fluid-agent -p 8080:8080 -p 8081:8081 -v fluid-data:/app/data fluid-agent
 ```
 
-With no mounts the agent creates `/app/config.json` and `/app/dynamic/`. For the Traefik setup in [`compose.yml`](compose.yml): `cp config.docker.json config.json`, `cp example.env .env` and set `PROXY_ADMIN_TOKEN`, set the host in `compose.yml`, then `docker compose up -d`. A bind-mounted file must exist on the host first (Docker would otherwise create a directory in its place, and the agent says so); a bind-mounted directory must be writable by uid 65532 for console edits.
+With no mounts the agent creates `/app/config.json` and `/app/dynamic/`. For the Traefik setup in [`compose.yml`](compose.yml): `cp examples/config.docker.json config.json`, `cp example.env .env` and set `PROXY_ADMIN_TOKEN`, set the host in `compose.yml`, then `docker compose up -d`. A bind-mounted file must exist on the host first (Docker would otherwise create a directory in its place, and the agent says so); a bind-mounted directory must be writable by uid 65532 for console edits.
 
 **Then:** open the console through an SSH tunnel (`ssh -L 9000:127.0.0.1:9000 server`, then <http://localhost:9000>) and sign in with the token from `admin.json`. Add proxy clients, allowed hosts, webhooks and ingest rules there, or copy the samples from [`examples/dynamic`](examples/dynamic) (replace every CHANGE-ME value) and run `fluid-agent check`.
 
@@ -294,6 +294,19 @@ On `SIGTERM` or `SIGINT` (`docker stop`, `systemctl stop`, Ctrl-C) the agent:
 
 A second signal stops it at once. Container and service stop timeouts must be longer than `shutdown_timeout`: the provided Compose files set `stop_grace_period: 30s` (Docker's default is 10s), the systemd unit `TimeoutStopSec=30s`; in Kubernetes keep `terminationGracePeriodSeconds` above it (the default 30s is fine).
 
+### Startup and shutdown hooks
+
+To run your own code around startup and shutdown, fill in the blocks in [`cmd/fluid-agent/hooks.go`](cmd/fluid-agent/hooks.go) and build the agent:
+
+| Hook | Runs | Waits for it |
+|---|---|---|
+| `BeforeStartup` | config loaded and logging ready, before any listener opens | startup, at most `Timeout` |
+| `AfterStartup` | every listener accepts requests | nothing: runs in the background, cancelled if shutdown begins first |
+| `BeforeShutdown` | a stop signal arrived and `/readyz` fails, before connections drain | shutdown, alongside `shutdown_delay` (only the part longer than the delay adds time), at most `Timeout` |
+| `AfterShutdown` | listeners closed and deliveries settled, before logs are flushed and the database closes | exit, at most `Timeout` |
+
+Hooks cannot break startup or graceful shutdown. An error or a panic is logged (`hook failed; carrying on`) and the agent continues. A hook still running at `Timeout` (default `10s`, set per build in `hooks.go`) gets its `ctx` cancelled and is left behind while the agent carries on, so watch `ctx` in slow work. Each run is logged with how long it took; `log/slog` output from a hook reaches stdout and the console's Logs page. Keep `Timeout` plus `shutdown_timeout` below your container's stop grace period.
+
 ## Tracing
 
 Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenTelemetry traces over OTLP/HTTP. Incoming `traceparent` headers are continued; background deliveries join the trace of the call that produced them, and log rows record the trace id.
@@ -314,9 +327,27 @@ Set `telemetry.otlp_endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) to export OpenT
 go test -race ./...
 node --check ui/app.js
 ./deploy/e2e/test.sh            # behind real nginx, Traefik and Caddy (Docker or Podman)
-go run . check -config config.example.json
-go run . init -config /tmp/fa/config.json   # what a first start creates
+go build -o fluid-agent ./cmd/fluid-agent
+go run ./cmd/fluid-agent check -config examples/config.example.json
+go run ./cmd/fluid-agent init -config /tmp/fa/config.json   # what a first start creates
 ```
+
+Layout:
+
+| Path | What it holds |
+|---|---|
+| `cmd/fluid-agent/` | the entry point and your [startup and shutdown hooks](#startup-and-shutdown-hooks) |
+| `internal/agent/` | the agent: proxy, `/forward`, webhooks and ingest, outbox, access rules, dynamic config, console API, log store |
+| `internal/config/` | `config.json`: loading, defaults, validation |
+| `internal/database/` | SQLite: open, migrations |
+| `internal/hooks/` | running hooks safely |
+| `internal/hub/` | live updates for the console's streams |
+| `internal/metrics/` | the Prometheus registry |
+| `internal/netguard/` | the private-address guard for outbound dials |
+| `internal/telemetry/` | OpenTelemetry tracing |
+| `ui/`, `schema/` | the console files and the JSON Schemas, embedded in the binary |
+| `examples/` | `config.example.json`, `config.docker.json` and sample dynamic files |
+| `deploy/` | installer, systemd, nginx, Traefik and Caddy examples, e2e suite |
 
 ## Releases
 

@@ -14,7 +14,7 @@ services:
     # or Docker creates a directory in its place; a bind-mounted directory must
     # be writable by uid 65532 for console/API edits (sudo chown 65532 dynamic).
     volumes:
-      - ./config.json:/app/config.json:ro   # cp config.docker.json config.json
+      - ./config.json:/app/config.json:ro   # cp examples/config.docker.json config.json
       - ./dynamic:/app/dynamic              # missing files and sub-directories are created
       - fluid-data:/app/data                # SQLite: logs, events, deliveries
     ports:

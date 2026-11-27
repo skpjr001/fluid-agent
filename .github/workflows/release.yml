@@ -33,8 +33,8 @@ jobs:
             bin=fluid-agent; [ "$os" = windows ] && bin=fluid-agent.exe
             mkdir -p "build/$name"
             GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath \
-              -ldflags="-s -w -X main.version=${VERSION}" -o "build/$name/$bin" .
-            cp -r README.md LICENSE config.example.json schema examples deploy "build/$name/"
+              -ldflags="-s -w -X main.version=${VERSION}" -o "build/$name/$bin" ./cmd/fluid-agent
+            cp -r README.md LICENSE schema examples deploy "build/$name/"
             if [ "$os" = windows ]; then
               (cd build && zip -qr "../dist/$name.zip" "$name")
             else
