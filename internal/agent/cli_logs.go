@@ -20,7 +20,7 @@ func cmdLogs(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	cfgPath := fs.String("config", "config.json", "static config file (to find the database)")
 	dbPath := fs.String("db", "", "database path (overrides config)")
-	kind := fs.String("kind", "", "comma-separated kinds: proxy_http, proxy_connect, proxy_denied, forward, webhook, ingest, delivery, auth, admin, config, system, app")
+	kind := fs.String("kind", "", "comma-separated kinds: proxy_http, proxy_connect, proxy_denied, forward, relay, webhook, ingest, delivery, auth, admin, config, system, app")
 	direction := fs.String("direction", "", "inbound or outbound")
 	level := fs.String("level", "", "minimum level: debug, info, warn, error")
 	client := fs.String("client", "", "proxy client name")

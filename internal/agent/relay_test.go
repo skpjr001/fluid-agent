@@ -217,7 +217,7 @@ func TestRelayIsLogged(t *testing.T) {
 	relayCall(t, "POST", ta.proxy.URL+"/relay/"+up.URL+"/logged", clientToken, "x", nil)
 	ta.flushLogs()
 	var n int
-	ta.db.QueryRow(`SELECT COUNT(*) FROM logs WHERE kind = 'forward' AND msg = 'relay'`).Scan(&n)
+	ta.db.QueryRow(`SELECT COUNT(*) FROM logs WHERE kind = 'relay' AND msg = 'relay'`).Scan(&n)
 	if n != 1 {
 		t.Fatalf("relay call should be logged once, got %d", n)
 	}

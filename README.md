@@ -193,7 +193,7 @@ curl 'https://gw.example.com/fluid-proxy/relay?target_url=https%3A%2F%2Fapi.exam
 * **The target** is the path after `/relay/` (as typed, URL-encoded, or with `//` merged by the reverse proxy) or `?target_url=`. A query form whose other parameters would be ambiguous (`?target_url=https://x/api?a=1&b=2`) is refused with `400`: encode the target or use the path form.
 * **Answers** stream back unchanged, compressed bodies included. After a redirect, `X-Fluid-Final-Url` names the last URL. When the agent itself refuses or fails a call, the answer carries `X-Fluid-Error: <CODE>` (`UNAUTHORIZED`, `VALIDATION`, `HOST_NOT_ALLOWED`, `BLOCKED_ADDRESS`, `TIMEOUT`, `UPSTREAM_FAILURE`, `TOO_LARGE`) and a JSON `{"error","code"}` body; without that header the answer came from the provider.
 * **Timeout**: `forward.default_timeout`, or `X-Fluid-Timeout-Ms` per call, capped by `forward.max_timeout`. Request bodies are limited by `max_body_bytes`.
-* Also at `/api/v1/relay`, and under `proxy_base_path`. Logged with `kind: forward`, `mode: relay`; metric `fluid_relay_requests_total`.
+* Also at `/api/v1/relay`, and under `proxy_base_path`. Logged with `kind: relay` (a filter of its own in the console and `fluid-agent logs -kind relay`); metric `fluid_relay_requests_total`.
 
 Safety rules (proxy, `/relay` and `/forward`):
 
@@ -236,7 +236,7 @@ Behind a reverse proxy, list it in `trusted_proxies`; `X-Forwarded-For` is then 
 
 ## Logs (SQLite) and querying
 
-Every proxy call, tunnel, forward, webhook, ingest, delivery, admin change and system message is stored with columns for `kind`, `direction` (**`inbound`** for calls arriving at the agent, **`outbound`** for calls it makes), `client`, `route`, `method`, `host`, `url`, `status`, bytes, duration, source IP and trace id. Retention: `database.retention_days`.
+Every proxy call, tunnel, relay, forward, webhook, ingest, delivery, admin change and system message is stored with columns for `kind`, `direction` (**`inbound`** for calls arriving at the agent, **`outbound`** for calls it makes), `client`, `route`, `method`, `host`, `url`, `status`, bytes, duration, source IP and trace id. Retention: `database.retention_days`.
 
 ```bash
 fluid-agent logs -direction inbound -since 24h               # incoming calls

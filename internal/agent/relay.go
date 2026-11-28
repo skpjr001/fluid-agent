@@ -126,7 +126,7 @@ func (f *Forwarder) ServeRelay(w http.ResponseWriter, r *http.Request, raw strin
 	fail := func(client, target string, fe *fwdError) {
 		f.app.metrics.Inc("fluid_relay_requests_total", "result", strings.ToLower(fe.code))
 		writeRelayError(w, fe)
-		slog.Warn("relay failed", "kind", "forward", "mode", "relay", "direction", "outbound", "client", client,
+		slog.Warn("relay failed", "kind", "relay", "direction", "outbound", "client", client,
 			"source_ip", src, "method", r.Method, "host", hostOf(target), "url", target, "status", fe.status,
 			"ms", time.Since(start).Milliseconds(), "code", fe.code, "err", fe.msg, "capture", logCap())
 	}
@@ -210,14 +210,14 @@ func (f *Forwarder) ServeRelay(w http.ResponseWriter, r *http.Request, raw strin
 	ms := time.Since(start).Milliseconds()
 	if err != nil {
 		f.app.metrics.Inc("fluid_relay_requests_total", "result", "upstream_failure")
-		slog.Warn("relay response cut short", "kind", "forward", "mode", "relay", "direction", "outbound", "client", client,
+		slog.Warn("relay response cut short", "kind", "relay", "direction", "outbound", "client", client,
 			"source_ip", src, "method", r.Method, "host", hostOf(final), "url", final, "status", resp.StatusCode,
 			"bytes_out", n, "ms", ms, "err", err, "capture", up)
 		telemetry.EndSpan(span, http.StatusBadGateway, err)
 		return
 	}
 	f.app.metrics.Inc("fluid_relay_requests_total", "result", "ok")
-	slog.Info("relay", "kind", "forward", "mode", "relay", "direction", "outbound", "client", client, "source_ip", src,
+	slog.Info("relay", "kind", "relay", "direction", "outbound", "client", client, "source_ip", src,
 		"method", r.Method, "host", hostOf(final), "url", final, "status", resp.StatusCode,
 		"bytes_in", len(body), "bytes_out", n, "ms", ms, "redirects", redirects, "capture", up)
 	telemetry.EndSpan(span, resp.StatusCode, nil)

@@ -823,7 +823,7 @@ async function pageOverview() {
       cfgErrs.map(([f, e]) => f + ": " + e).join("\n")) : null,
     h("div", { class: "cards" },
       card("Inbound calls", String(d.inbound?.count || 0), "webhooks + ingest, 24h", "/logs?direction=inbound&since=24h"),
-      card("Outbound calls", String(d.outbound?.count || 0), "proxy, forward, deliveries", "/logs?direction=outbound&since=24h"),
+      card("Outbound calls", String(d.outbound?.count || 0), "proxy, relay, forward, deliveries", "/logs?direction=outbound&since=24h"),
       card("Errors", String(errs), "status ≥ 400 or level error", "/logs?status=error&since=24h"),
       card("Pending deliveries", String(st.deliveries.pending + st.deliveries.inflight), "queued or in flight", "/deliveries?status=pending"),
       card("Dead letters", String(st.deliveries.dead + st.deliveries.failed), "need attention", "/deliveries?view=board"),
@@ -1052,7 +1052,7 @@ async function pageDeliveries() {
 
 // ---------------------------------------------------------------- logs
 
-const KINDS = ["proxy_http", "proxy_connect", "proxy_denied", "forward", "webhook", "ingest", "delivery", "auth", "admin", "config", "system", "app"];
+const KINDS = ["proxy_http", "proxy_connect", "proxy_denied", "forward", "relay", "webhook", "ingest", "delivery", "auth", "admin", "config", "system", "app"];
 
 async function pageLogs() {
   const initialFilters = legacyFilters({ kind: exact("kind"), route: exact("route"), client: exact("client"), host: exact("host"),
@@ -1138,7 +1138,7 @@ async function pageLogs() {
   const reload = () => (t ? t.reload() : drawSummary());
   const setPage = (k, v) => { f[k] = v; pushQuery(f, defaults); reload(); };
   page("Logs", {
-    desc: "Every proxy call, forward, webhook, ingest and delivery, stored in SQLite. Incoming calls are marked IN, outgoing calls OUT. Filter any column; Shift+click headers to sort by several.",
+    desc: "Every proxy call, relay, forward, webhook, ingest and delivery, stored in SQLite. Incoming calls are marked IN, outgoing calls OUT. Filter any column; Shift+click headers to sort by several.",
     actions: h("button", { class: "btn", onclick: reload }, icon("refresh"), "Refresh"),
   },
     h("div", { class: "toolbar" },
@@ -1505,7 +1505,7 @@ async function pageProxy() {
   ];
   const showToken = (name, token) => modal("Token for " + name,
     [h("p", {}, "Copy this token now — it will not be shown again."), h("pre", { class: "code" }, token),
-      h("p", { class: "help" }, "Use it as the proxy password (http://any:<token>@agent:8080) or the X-Agent-Key header for /forward.")],
+      h("p", { class: "help" }, "Use it as the proxy password (http://any:<token>@agent:8080) or the X-Agent-Key header for /relay and /forward.")],
     [h("button", { class: "btn", onclick: () => navigator.clipboard?.writeText(token).then(() => toast("Copied")) }, "Copy"),
       h("button", { class: "btn primary", onclick: () => { closeModal(); route(); } }, "Done")]);
   const clientCall = async (method, name, body) => {
@@ -1545,7 +1545,7 @@ async function pageProxy() {
         } }, "Save")]);
   };
   const el = page("Proxy & clients", {
-    desc: "Outbound traffic (HTTP/CONNECT proxy and /forward) may only reach these destinations, using one of these client tokens.",
+    desc: "Outbound traffic (HTTP/CONNECT proxy, /relay and /forward) may only reach these destinations, using one of these client tokens.",
     actions: isEditor() ? [h("button", { class: "btn", onclick: editRules }, icon("edit"), "Edit rules"),
       h("button", { class: "btn primary", onclick: createClient }, icon("plus"), "Create client")] : null,
   }, viewerNote(),
@@ -1556,7 +1556,7 @@ async function pageProxy() {
           ["Private addresses", p.allow_private ? lozenge("allowed", "danger") : lozenge("blocked", "success")],
           ["Private allowlist", p.private_allowlist.join(", ") || null]])),
       h("div", { class: "panel" }, h("h2", {}, "How to connect"),
-        h("pre", { class: "code" }, "export HTTPS_PROXY=http://any:<TOKEN>@<agent>:8080\n\n# or the JSON relay\ncurl -X POST http://<agent>:8080/forward \\\n  -H 'X-Agent-Key: <TOKEN>' \\\n  -d '{\"method\":\"GET\",\"url\":\"https://api.example.com/x\"}'"))),
+        h("pre", { class: "code" }, "export HTTPS_PROXY=http://any:<TOKEN>@<agent>:8080\n\n# or your request unchanged, with the agent in front of the URL\ncurl -X POST http://<agent>:8080/relay/https://api.example.com/x \\\n  -H 'X-Agent-Key: <TOKEN>' -H 'Content-Type: application/json' -d '{\"a\":1}'\n\n# or the JSON relay\ncurl -X POST http://<agent>:8080/forward \\\n  -H 'X-Agent-Key: <TOKEN>' \\\n  -d '{\"method\":\"GET\",\"url\":\"https://api.example.com/x\"}'"))),
     h("h2", {}, "Clients"),
     dataTable({ id: "clients", cols: clientCols, rows: p.clients, defaultSort: ["name:asc"], exportName: "proxy-clients",
       empty: ["No clients", "Create one to let applications use the proxy."] }).el);
@@ -1574,7 +1574,7 @@ async function pageAccess() {
     return isDefault(l) ? lozenge("Restricted default", "success") : lozenge("Restricted", "success");
   };
   const lists = [
-    { k: "proxy", title: "Forward proxy & /forward", what: "Applications that send outbound traffic through this agent." },
+    { k: "proxy", title: "Forward proxy, /relay & /forward", what: "Applications that send outbound traffic through this agent." },
     { k: "admin", title: "Console & API", what: "People and tools using this console, the API and /metrics." },
   ];
   const rules = (l) => h("div", { class: "rule-list" }, l.map((r) => h("code", { class: "rule" }, r)));
@@ -1615,7 +1615,7 @@ async function pageAccess() {
     const obj = { proxy: a.proxy };
     const err = h("div", { class: "form-error hidden" });
     modal("Edit proxy allowlist", [err,
-      fieldInput({ k: "proxy", label: "Forward proxy & /forward", type: "list", help: IP_HELP + " Empty refuses everyone." }, obj, false),
+      fieldInput({ k: "proxy", label: "Forward proxy, /relay & /forward", type: "list", help: IP_HELP + " Empty refuses everyone." }, obj, false),
       h("p", { class: "help" }, "The console & API list is file-only. Webhooks and ingest rules have their own Allowed IPs in their edit form.")],
     [h("button", { class: "btn subtle", onclick: closeModal }, "Cancel"),
       h("button", { class: "btn subtle", onclick: () => save({ proxy: [...a.default] }) }, "Reset to restricted default"),
