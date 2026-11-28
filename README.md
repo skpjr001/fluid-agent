@@ -20,7 +20,7 @@ No setup is needed: on first start the agent creates every directory and config 
 curl -fsSL https://raw.githubusercontent.com/skpjr001/fluid-agent/main/deploy/install.sh | sudo bash
 ```
 
-It asks whether to expose the proxy, the webhook listener and the console on the host, each separately and **not exposed by default**, where to keep data (Docker volumes by default, or host directories under `/fluid/agent`), and which client IPs may use the proxy and console. See [deploy/README.md](deploy/README.md#installer-for-a-linux-vm).
+It asks whether to expose the proxy, the webhook listener and the console on the host, each separately and **not exposed by default**, where to keep data (Docker volumes by default, or host directories under `/fluid/agent`), which client IPs may use the proxy and console, and which additional Docker networks to join (so a reverse proxy or your applications in containers reach it by name). See [deploy/README.md](deploy/README.md#installer-for-a-linux-vm).
 
 **On a host**
 

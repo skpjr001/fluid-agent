@@ -71,6 +71,7 @@ At startup the agent inspects how it is running and logs every caveat that appli
 ```bash
 curl -fsSL https://raw.githubusercontent.com/skpjr001/fluid-agent/main/deploy/install.sh | sudo bash   # interactive
 sudo bash install.sh --yes --expose-ui 127.0.0.1:9000 --expose-webhook 0.0.0.0:8081               # unattended
+sudo bash install.sh --yes --networks proxy-net,apps                                             # join existing Docker networks
 ```
 
 1. **Checks** the OS and CPU (amd64/arm64), init system, memory, free disk where Docker keeps its data (stops when too low), package manager and internet access.
@@ -78,12 +79,13 @@ sudo bash install.sh --yes --expose-ui 127.0.0.1:9000 --expose-webhook 0.0.0.0:8
 3. **Asks**, each with a safe default:
    * storage: **Docker volumes** `fluid-agent-data` and `fluid-agent-dynamic` (default) or host directories, by default `/fluid/agent/data` and `/fluid/agent/dynamic`, created if missing and given to the container user (uid 65532, mode 0750, including files already inside) on every run;
    * whether to publish the **proxy** (8080), the **webhook listener** (8081) and the **console** (9000) on the host, one by one, **default: not exposed**; for each one exposed, the bind address (`127.0.0.1` or `0.0.0.0`) and host port;
-   * which client IPs may use the proxy and the console (`access.json`; webhook senders are set per route with `allowed_ips`).
+   * which client IPs may use the proxy and the console (`access.json`; webhook senders are set per route with `allowed_ips`);
+   * which **additional Docker networks** to attach the container to (default: none), e.g. your reverse proxy's or your applications' network. Containers on them reach the agent by name (`http://fluid-agent:8081`, `:8080`, `:9000`) without publishing ports. The networks must exist (interactively, the installer offers to create a missing one); they are declared `external`, so `--uninstall` never removes them. The project's own network is always kept, so published ports keep working. A reverse proxy reaching the agent this way connects from that network's address: list it in `trusted_proxies` so the real client address is checked.
 4. **Runs** it with Docker Compose in `/opt/fluid-agent` (`config.json`, `docker-compose.yml`, a copy of the installer), waits until healthy, and prints the URLs, how to read the generated editor token, and how to manage it.
 
 To look around from inside the container, see [Debugging inside a container](../README.md#debugging-inside-a-container): the image has no shell or curl.
 
-Re-running upgrades to the latest release and keeps config, data and earlier answers (pass new `--expose-*` / `--allow-*` values to change them). `--uninstall` removes the container and keeps the data; `--uninstall --purge` deletes everything after confirmation. `--help` lists every option; every question also has a flag, so `--yes` installs unattended.
+Re-running upgrades to the latest release and keeps config, data and earlier answers (pass new `--expose-*` / `--allow-*` / `--networks` values to change them; `--networks none` detaches the extra networks). `--uninstall` removes the container and keeps the data; `--uninstall --purge` deletes everything after confirmation. `--help` lists every option; every question also has a flag, so `--yes` installs unattended.
 
 Tested on Ubuntu 24.04 (volumes and host directories, interactive and unattended, upgrade, allowlist enforcement, uninstall/purge) and Rocky Linux 9.
 

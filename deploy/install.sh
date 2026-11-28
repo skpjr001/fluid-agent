@@ -27,6 +27,7 @@ DATA_PATH=""           # host directory base for bind mounts
 DEFAULT_DATA_PATH="/fluid/agent"   # default for --storage bind: <path>/data and <path>/dynamic
 EXPOSE_PROXY="" EXPOSE_WEBHOOK="" EXPOSE_UI=""      # no | PORT | IP:PORT | "" (ask)
 ALLOW_PROXY="" ALLOW_UI=""                          # comma-separated allowlists, "" = ask/keep
+NETWORKS=""            # extra Docker networks, comma separated; "none" = only the default one; "" = ask/keep
 UNINSTALL=0 PURGE=0 FORCE=0
 CONTAINER="fluid-agent"
 NONROOT_UID=65532      # distroless "nonroot"
@@ -55,6 +56,8 @@ Usage: sudo bash install.sh [options]
                            PORT alone binds 127.0.0.1; use 0.0.0.0:PORT for all interfaces
   --allow-proxy LIST       client IPs allowed to use the proxy (comma separated; CIDRs, 10.0.*.* wildcards)
   --allow-ui LIST          client IPs allowed to use the console
+  --networks LIST          also attach the container to these existing Docker networks (comma separated),
+                           e.g. a reverse proxy's or your applications' network; "none" detaches them
   --with-go | --no-go      also install the Go toolchain on the host (not needed to run)
   --yes                    accept defaults, never prompt (nothing exposed unless --expose-*)
   --uninstall              stop and remove the container (keeps data); add --purge to delete data too
@@ -75,6 +78,7 @@ while [ $# -gt 0 ]; do
     --expose-ui) EXPOSE_UI="$2"; shift ;;
     --allow-proxy) ALLOW_PROXY="$2"; shift ;;
     --allow-ui) ALLOW_UI="$2"; shift ;;
+    --networks) NETWORKS="$2"; shift ;;
     --with-go) WITH_GO="yes" ;;
     --no-go) WITH_GO="no" ;;
     --yes|-y) ASSUME_YES=1 ;;
@@ -411,6 +415,45 @@ ok "console: $(describe "$EXPOSE_UI")"
 [[ "$EXPOSE_PROXY" == 0.0.0.0:* ]] && warn "the forward proxy is published on all interfaces: firewall it to your application servers and set its allowlist"
 [[ "$EXPOSE_WEBHOOK" == 0.0.0.0:* ]] && warn "webhooks over plain HTTP: most providers require HTTPS; put a TLS reverse proxy in front or set webhook_tls"
 
+# Extra Docker networks: lets containers on them (a reverse proxy, your applications) reach the agent
+# by name (http://fluid-agent:8081) without publishing ports. The default network is always kept.
+if [ -z "$NETWORKS" ]; then
+  NETWORKS=${PREV_NETWORKS:-none}
+  if [ -n "$TTY" ]; then
+    others=$(docker network ls --format '{{.Name}}' 2>/dev/null | grep -vxE 'bridge|host|none|fluid-agent_default' | paste -sd, - | sed 's/,/, /g')
+    echo "  Docker networks on this host: ${others:-none besides the defaults}"
+    ask NETWORKS "Attach the container to additional Docker networks? (comma separated names, none = no)" "$NETWORKS"
+  fi
+fi
+NETWORKS=$(printf '%s' "$NETWORKS" | tr -d '[:space:]')
+case "$NETWORKS" in ""|none|no|NONE) NETWORKS=none ;; esac
+NET_LIST=()
+if [ "$NETWORKS" != none ]; then
+  IFS=, read -r -a parts <<<"$NETWORKS"
+  for n in "${parts[@]}"; do
+    [ -n "$n" ] || continue
+    [[ "$n" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || die "bad Docker network name: $n"
+    case "$n" in bridge|host|none) die "network $n cannot be added: the container already uses the project's default network" ;; esac
+    [[ " ${NET_LIST[*]} " == *" $n "* ]] && continue
+    if ! docker network inspect "$n" >/dev/null 2>&1; then
+      if [ -n "$TTY" ] && yesno "  Docker network $n does not exist. Create it (bridge)?" n; then
+        docker network create "$n" >/dev/null || die "creating network $n failed"
+        ok "created Docker network $n"
+      else
+        die "Docker network $n does not exist (create it with: docker network create $n)"
+      fi
+    fi
+    NET_LIST+=("$n")
+  done
+  [ ${#NET_LIST[@]} -gt 0 ] || NETWORKS=none
+  [ ${#NET_LIST[@]} -gt 0 ] && NETWORKS=$(IFS=,; echo "${NET_LIST[*]}")
+fi
+if [ "$NETWORKS" = none ]; then
+  ok "networks: the project's default network only"
+else
+  ok "networks: default + ${NETWORKS//,/, } (containers there reach it as fluid-agent:8080 / :8081 / :9000)"
+fi
+
 # Allowlists for the proxy and the console (webhook senders are set per route, in each webhook/ingest file).
 if [ -z "$ALLOW_PROXY$ALLOW_UI" ] && [ -n "$TTY" ] && { [ "$EXPOSE_PROXY" != no ] || [ "$EXPOSE_UI" != no ]; }; then
   echo "  Allowlists: who may connect. Empty keeps the current list (first install: loopback and private networks only)."
@@ -534,6 +577,20 @@ fi
   else
     echo "    # no ports published (re-run the installer to expose the proxy, webhooks or console)"
   fi
+  if [ ${#NET_LIST[@]} -gt 0 ]; then
+    echo "    networks:"
+    echo "      - default"
+    for n in "${NET_LIST[@]}"; do echo "      - \"$n\""; done
+  fi
+  if [ ${#NET_LIST[@]} -gt 0 ]; then
+    echo "networks:"
+    echo "  default: {}"
+    for n in "${NET_LIST[@]}"; do
+      echo "  \"$n\":"
+      echo "    external: true   # created outside this install; never removed by --uninstall"
+      echo "    name: \"$n\""
+    done
+  fi
   if [ "$STORAGE" = volume ]; then
     echo "volumes:"
     echo "  fluid-agent-data:"
@@ -559,6 +616,7 @@ PREV_DATA_PATH='$DATA_PATH'
 PREV_EXPOSE_PROXY='$EXPOSE_PROXY'
 PREV_EXPOSE_WEBHOOK='$EXPOSE_WEBHOOK'
 PREV_EXPOSE_UI='$EXPOSE_UI'
+PREV_NETWORKS='$NETWORKS'
 EOF
 
 # ------------------------------------------------------------------ start
@@ -623,6 +681,7 @@ echo
 echo "  Editor token (generated on first start; keep it secret):"
 echo "    sudo docker cp $CONTAINER:/app/dynamic/admin.json - | tar -xO"
 echo
+[ "$NETWORKS" != none ] && echo "  Networks:  also on ${NETWORKS//,/, }: other containers there use http://$CONTAINER:8081 (webhooks), :8080 (proxy), :9000 (console)"
 echo "  Manage:    cd $DIR && sudo docker compose -p fluid-agent ps | logs -f | restart"
 echo "  Logs:      sudo docker exec $CONTAINER /fluid-agent logs -config /app/config.json -since 1h"
 echo "  Check:     sudo docker exec $CONTAINER /fluid-agent check -config /app/config.json"
