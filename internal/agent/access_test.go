@@ -309,7 +309,7 @@ func TestAccessNotes(t *testing.T) {
 		{"warn", "webhook open accepts requests from any address without auth"},
 		{"info", "webhook signed accepts any address; requests must pass its auth"},
 		{"info", "webhook rz accepts only: 52.66.*.*, 13.232.0.0/16"},
-		{"info", "forward proxy and /forward accept only loopback and private networks"},
+		{"info", "forward proxy, /relay and /forward accept only loopback and private networks"},
 		{"warn", "rootless Podman"},
 		{"info", "list it in trusted_proxies"},
 	} {

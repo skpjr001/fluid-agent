@@ -100,7 +100,7 @@ check "fresh: proxy refuses a public client by default" '403' "$($COMPOSE exec -
 check "fresh: proxy lets a private client reach auth" '401' "$($COMPOSE exec -T tester curl -s -o /dev/null -w '%{http_code}' -X POST http://agent-fresh:8080/forward -d '{}')"
 sleep 1
 check "fresh: denial logged with the sender" '"source_ip":"172.32.0.50"' "$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"kind":"access"')"
-check "fresh: restricted-default note" 'forward proxy and /forward accept only loopback and private networks' "$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"topic":"access"')"
+check "fresh: restricted-default note" 'forward proxy, /relay and /forward accept only loopback and private networks' "$($COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep '"topic":"access"')"
 check "fresh: created files are valid" 'OK: all config files are valid' "$($F check -config /app/config.json 2>&1)"
 check "fresh: init on a second run creates nothing" 'nothing to create' "$($F init -config /app/config.json 2>&1)"
 nboot() { $COMPOSE logs --no-log-prefix agent-fresh 2>/dev/null | grep -c '"topic":"bootstrap"'; }

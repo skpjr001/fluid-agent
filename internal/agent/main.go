@@ -559,6 +559,7 @@ func describeMetrics(m *metrics.Metrics) {
 	for name, h := range map[string]string{
 		"fluid_proxy_requests_total":       "Forward proxy requests by kind (http, connect) and result.",
 		"fluid_forward_requests_total":     "JSON /forward requests by result.",
+		"fluid_relay_requests_total":       "/relay requests by result.",
 		"fluid_inbound_requests_total":     "Webhook and ingest requests by source, route and result.",
 		"fluid_deliveries_total":           "Delivery attempts by mode and result.",
 		"fluid_config_reloads_total":       "Config reloads by result.",

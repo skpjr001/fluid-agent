@@ -62,10 +62,11 @@ func ferr(status int, code, format string, a ...any) *fwdError {
 type Forwarder struct {
 	app    *App
 	client *http.Client
+	raw    *http.Client // relay: bytes passed through undecoded
 }
 
 func NewForwarder(app *App) *Forwarder {
-	return &Forwarder{app: app, client: &http.Client{
+	return &Forwarder{app: app, raw: rawClient(app), client: &http.Client{
 		Transport: &http.Transport{
 			Proxy:               nil,
 			DialContext:         app.guard.DialContext,
@@ -333,6 +334,10 @@ func (f *Forwarder) do(ctx context.Context, client string, req *ForwardRequest) 
 
 // send makes one request, retrying idempotent methods on network errors.
 func (f *Forwarder) send(ctx context.Context, method, target string, h http.Header, body []byte) (*http.Response, error) {
+	return f.sendWith(ctx, f.client, method, target, h, body)
+}
+
+func (f *Forwarder) sendWith(ctx context.Context, hc *http.Client, method, target string, h http.Header, body []byte) (*http.Response, error) {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
@@ -351,7 +356,7 @@ func (f *Forwarder) send(ctx context.Context, method, target string, h http.Head
 		}
 		req.Header = h.Clone()
 		telemetry.Inject(ctx, req.Header)
-		resp, err := f.client.Do(req)
+		resp, err := hc.Do(req)
 		if err == nil {
 			return resp, nil
 		}

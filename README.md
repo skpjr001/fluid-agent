@@ -4,7 +4,7 @@ A single Go binary for servers whose IP is allowlisted by payment providers, exc
 
 | Listener | Default | Purpose |
 |---|---|---|
-| Proxy | `:8080` | Real HTTP/`CONNECT` forward proxy (works with `HTTPS_PROXY`) **and** a JSON relay at `POST /forward`. Named client tokens, host/port allowlist, private-address guard. |
+| Proxy | `:8080` | Real HTTP/`CONNECT` forward proxy (works with `HTTPS_PROXY`) **and** two relays that work behind a reverse proxy: `/relay` (send your request unchanged) and JSON `POST /forward`. Named client tokens, host/port allowlist, private-address guard. |
 | Webhook / ingest | `:8081` | `/hooks/{id}[/sub/path]` webhooks, plus path-rule **callback ingest** on every other path. Optional auth, per-IP rate limit, durable delivery with retries. |
 | Admin | `127.0.0.1:9000` | Web console (JIRA-style), REST API, live stream, Prometheus `/metrics`. **Viewer** and **editor** tokens. |
 
@@ -158,7 +158,7 @@ curl -H "$A" -X PATCH $API/webhooks/razorpay -d '{"allowed_ips":["52.66.*.*"]}'
 curl -H "$A" -X POST $API/access/test -d '{"ip":"52.66.10.20"}'   # allowed? and which rule matched, per route
 ```
 
-## Outbound: proxy, `/forward` and profiles
+## Outbound: proxy, `/relay`, `/forward` and profiles
 
 ```bash
 export HTTPS_PROXY=http://dev:<CLIENT_TOKEN>@agent:8080        # any SDK; username is ignored
@@ -173,11 +173,33 @@ curl -X POST http://agent:8080/forward -H "X-Agent-Key: <CLIENT_TOKEN>" \
   -d '{"profile":"razorpay","method":"GET","path":"/payments?count=10"}'
 ```
 
-Safety rules:
+### `/relay`: your request, unchanged
+
+Keep the request exactly as you would send it to the provider (method, headers, body) and put the agent in front of the URL, plus your client token in `X-Agent-Key`. The answer is the provider's own status, headers and body, unwrapped.
+
+```bash
+# path form: everything after /relay/ is the target, its query string included
+curl -X POST 'https://gw.example.com/fluid-proxy/relay/https://ibbs.bseindia.com/ibbsmsgapi/iBBSWebBroadcastApi.svc/v1/exchtime_new' \
+  -H 'X-Agent-Key: <CLIENT_TOKEN>' \
+  -H 'Content-Type: application/json' -H 'Login: ...' -H 'Membercode: ...' -H 'Token: ...' \
+  -d '{"tradedate":"28 Nov 2026"}'
+
+# query form: same call; URL-encode the target when it has its own query string
+curl 'https://gw.example.com/fluid-proxy/relay?target_url=https%3A%2F%2Fapi.example.com%2Fv1%2Fitems%3Fa%3D1%26b%3D2' \
+  -H 'X-Agent-Key: <CLIENT_TOKEN>'
+```
+
+* **Method, body and headers** are the caller's own. Removed before the call: `X-Agent-Key`, `Host` (set from the target), connection headers, and what a reverse proxy adds (`X-Forwarded-*`, `X-Real-IP`, `Forwarded`, `Via`), so the provider never sees internal addresses. `Authorization` and cookies are passed on: they belong to the provider call, which is why the client token goes in `X-Agent-Key` only (`Proxy-Authorization` also works).
+* **The target** is the path after `/relay/` (as typed, URL-encoded, or with `//` merged by the reverse proxy) or `?target_url=`. A query form whose other parameters would be ambiguous (`?target_url=https://x/api?a=1&b=2`) is refused with `400`: encode the target or use the path form.
+* **Answers** stream back unchanged, compressed bodies included. After a redirect, `X-Fluid-Final-Url` names the last URL. When the agent itself refuses or fails a call, the answer carries `X-Fluid-Error: <CODE>` (`UNAUTHORIZED`, `VALIDATION`, `HOST_NOT_ALLOWED`, `BLOCKED_ADDRESS`, `TIMEOUT`, `UPSTREAM_FAILURE`, `TOO_LARGE`) and a JSON `{"error","code"}` body; without that header the answer came from the provider.
+* **Timeout**: `forward.default_timeout`, or `X-Fluid-Timeout-Ms` per call, capped by `forward.max_timeout`. Request bodies are limited by `max_body_bytes`.
+* Also at `/api/v1/relay`, and under `proxy_base_path`. Logged with `kind: forward`, `mode: relay`; metric `fluid_relay_requests_total`.
+
+Safety rules (proxy, `/relay` and `/forward`):
 
 * Destinations must match `allowed_hosts` (exact or `*.domain`) **and** `allowed_ports`.
 * The resolved IP is checked at connect time (also defeats DNS rebinding): loopback, private, link-local/metadata (`169.254.169.254`), CGNAT, multicast and IPv6 forms that embed them (mapped, NAT64, 6to4, Teredo) are refused unless `allow_private` or `private_allowlist` says otherwise.
-* `/forward` follows redirects itself, re-checking every hop, refusing https→http, and dropping profile credentials and `Authorization`/`Cookie` on cross-origin hops.
+* `/relay` and `/forward` follow redirects themselves, re-checking every hop, refusing https→http, and dropping profile credentials and `Authorization`/`Cookie` on cross-origin hops (a 307/308 keeps the method and body).
 * Pooled connections are closed whenever the rules change, so revocations apply at once.
 * CONNECT tunnels close after `tunnel_idle_timeout` without traffic.
 
@@ -235,6 +257,7 @@ Every logged API call also stores what went over the wire, **in full**: request 
 | Webhook / ingest (inbound) | the request as the sender sent it, and the agent's answer (including a passed-through target answer); refused calls (auth, method, IP, rate limit) too |
 | Delivery (outbound) | the request sent to the target (with `target_auth` and `add_headers`) and the target's answer, per attempt |
 | `/forward` (outbound) | the request sent upstream (with profile credentials) and the upstream answer; if the upstream is never reached, the client's `/forward` call and the agent's answer |
+| `/relay` (outbound) | the request sent to the target and its answer; if the target is never reached, the client's call and the agent's answer |
 | HTTP proxy (outbound) | the request sent upstream and the answer, bodies copied as they stream |
 | HTTPS tunnel (`CONNECT`) | the CONNECT request and answer only: the traffic inside is end-to-end encrypted |
 
@@ -337,7 +360,7 @@ Layout:
 | Path | What it holds |
 |---|---|
 | `cmd/fluid-agent/` | the entry point and your [startup and shutdown hooks](#startup-and-shutdown-hooks) |
-| `internal/agent/` | the agent: proxy, `/forward`, webhooks and ingest, outbox, access rules, dynamic config, console API, log store |
+| `internal/agent/` | the agent: proxy, `/relay`, `/forward`, webhooks and ingest, outbox, access rules, dynamic config, console API, log store |
 | `internal/config/` | `config.json`: loading, defaults, validation |
 | `internal/database/` | SQLite: open, migrations |
 | `internal/hooks/` | running hooks safely |

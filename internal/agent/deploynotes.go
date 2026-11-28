@@ -181,7 +181,7 @@ func deploymentNotes(cfg *config.StaticConfig, snap *snapshot, env hostEnv, envA
 		n.add("info", "proxy", "forward proxy is plain HTTP: publish its port only to trusted networks (firewall), or set proxy_tls")
 	}
 	if cfg.ProxyBasePath != "" {
-		n.add("info", "proxy", "JSON relay at %s/forward (also /forward if the reverse proxy strips the prefix)", cfg.ProxyBasePath)
+		n.add("info", "proxy", "relays at %s/relay and %s/forward (also without the prefix if the reverse proxy strips it)", cfg.ProxyBasePath, cfg.ProxyBasePath)
 	}
 	pc := snap.proxy
 	if len(pc.Clients) == 0 {
@@ -361,7 +361,7 @@ func accessNotes(cfg *config.StaticConfig, snap *snapshot, env hostEnv) []Deploy
 	}
 	public := netip.MustParseAddr("8.8.8.8")
 	restricted := false
-	what := map[string]string{"proxy": "forward proxy and /forward", "admin": "console and API"}
+	what := map[string]string{"proxy": "forward proxy, /relay and /forward", "admin": "console and API"}
 	for _, name := range []string{"proxy", "admin"} {
 		l := ac.list(name)
 		list := strings.Join(l.Allow, ", ")

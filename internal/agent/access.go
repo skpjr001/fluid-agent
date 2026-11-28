@@ -167,7 +167,7 @@ var defaultAllow = []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/
 // An omitted list means defaultAllow, [] means nobody, ["*"] means everyone.
 type AccessConfig struct {
 	Schema string     `json:"$schema,omitempty"`
-	Proxy  AccessList `json:"proxy"` // HTTP/CONNECT proxy and /forward
+	Proxy  AccessList `json:"proxy"` // HTTP/CONNECT proxy, /relay and /forward
 	Admin  AccessList `json:"admin"` // console, API, /metrics (file-only: never changed over the API)
 }
 

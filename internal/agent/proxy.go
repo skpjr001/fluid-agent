@@ -140,17 +140,22 @@ func NewForwardProxy(app *App) *ForwardProxy {
 
 func (fp *ForwardProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodConnect && !r.URL.IsAbs() {
-		path := r.URL.Path
+		path, raw := r.URL.Path, r.RequestURI
 		if b := fp.app.cfg.ProxyBasePath; b != "" && (path == b || strings.HasPrefix(path, b+"/")) {
 			path = strings.TrimPrefix(path, b)
+			raw = strings.TrimPrefix(raw, b)
 		}
-		switch path {
-		case "/forward", "/api/v1/forward":
+		switch {
+		case path == "/forward" || path == "/api/v1/forward":
 			fp.app.forward.ServeHTTP(w, r)
-		case "/healthz":
+		case path == "/healthz":
 			w.Write([]byte("ok"))
+		case isRelayPath(path):
+			fp.app.forward.ServeRelay(w, r, raw)
+		case isRelayPath(r.URL.Path): // a base path named like the route, e.g. "/relay"
+			fp.app.forward.ServeRelay(w, r, r.RequestURI)
 		default:
-			http.Error(w, "this is a forward proxy; send absolute URLs or POST /forward", http.StatusBadRequest)
+			http.Error(w, "this is a forward proxy; send absolute URLs, POST /forward or use /relay", http.StatusBadRequest)
 		}
 		return
 	}

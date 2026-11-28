@@ -144,7 +144,7 @@ func TestNotesBehindReverseProxy(t *testing.T) {
 		{"warn", "trusted_proxies contains 0.0.0.0/0"},
 		{"info", "console at /console/"},
 		{"info", "webhooks at /gw/hooks/<id>"},
-		{"info", "JSON relay at /relay/forward"},
+		{"info", "relays at /relay/relay and /relay/forward"},
 		{"info", "admin listener: http://127.0.0.1:9000 (loopback only), path /console"},
 	} {
 		if !has(ns, want.level, want.frag) {

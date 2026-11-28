@@ -8,7 +8,7 @@ fluid-agent runs as a plain binary (systemd), in a container, with or without a 
 |---|---|---|---|---|---|
 | Webhooks / ingest `:8081` | ✅ `webhook_tls` | ✅ | ✅ | ✅ | ✅ with `webhook_base_path` |
 | Console + API `:9000` | ✅ `admin_tls` | ✅ | ✅ | ✅ with `admin_base_path` or `X-Forwarded-Prefix` | ✅ with `admin_base_path` |
-| `POST /forward` `:8080` | ✅ `proxy_tls` | ✅ | ✅ | ✅ | ✅ with `proxy_base_path` |
+| `/relay`, `POST /forward` `:8080` | ✅ `proxy_tls` | ✅ | ✅ | ✅ | ✅ with `proxy_base_path` |
 | HTTP/CONNECT proxy `:8080` | ✅ `proxy_tls` (https:// proxy URL) | TCP passthrough only | TCP passthrough only | ❌ (not HTTP routing) | ❌ |
 
 * **Base paths** (`proxy_base_path`, `webhook_base_path`, `admin_base_path`) accept requests both with and without the prefix, so it does not matter whether the reverse proxy strips it. The console learns its external prefix from `admin_base_path`, or from `X-Forwarded-Prefix` sent by a peer in `trusted_proxies` (Traefik's StripPrefix sets it; for Caddy add `header_up X-Forwarded-Prefix /console`).
